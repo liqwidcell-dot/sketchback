@@ -56,6 +56,17 @@
   --color-danger: #d1706a;
 }
 
+/* The accent's sanctioned homes (plan §27): focus rings, active nav, primary
+   buttons. These are the global ones — components opt in for the rest. */
+:where(a, button, [role="button"], [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-accent) 26%, transparent);
+}
+
 html,
 body,
 #root {
@@ -69,6 +80,7 @@ body {
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 24px;
+  caret-color: var(--color-accent);
   -webkit-font-smoothing: antialiased;
 }
 

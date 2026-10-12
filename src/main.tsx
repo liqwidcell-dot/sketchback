@@ -374,12 +374,15 @@ function Sidebar({
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border-subtle bg-surface-sunken">
       <header className="flex items-center gap-2 px-3 py-3">
-        <span className="text-sm font-semibold tracking-wide">Sketchback</span>
+        <span className="flex items-center gap-1.5 text-sm font-semibold tracking-wide">
+          <span aria-hidden className="size-1.5 rounded-full bg-accent" />
+          Sketchback
+        </span>
         <button
           type="button"
           onClick={onNew}
           title="New idea"
-          className="ml-auto rounded border border-border-subtle bg-surface-raised px-2 py-0.5 text-xs text-text-secondary transition-colors duration-[120ms] ease-standard hover:border-accent hover:text-accent"
+          className="ml-auto rounded border border-accent/40 bg-surface-raised px-2 py-0.5 text-xs text-accent transition-colors duration-[120ms] ease-standard hover:border-accent hover:bg-accent hover:text-on-accent"
         >
           +
         </button>
@@ -397,15 +400,24 @@ function Sidebar({
                   <button
                     type="button"
                     onClick={() => onOpen(idea.id)}
+                    aria-current={active ? "page" : undefined}
                     className={[
-                      "flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm",
+                      "relative flex w-full items-center gap-2 rounded py-1 pr-2 pl-3 text-left text-sm",
                       "transition-colors duration-[120ms] ease-standard",
                       active
                         ? "bg-surface-raised text-text-primary shadow-[0_4px_12px_rgb(0_0_0/0.08)]"
                         : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
                     ].join(" ")}
                   >
-                    <span>{idea.icon ?? "◇"}</span>
+                    {active && (
+                      <span
+                        aria-hidden
+                        className="absolute top-1 bottom-1 left-1 w-0.5 rounded-full bg-accent"
+                      />
+                    )}
+                    <span className={active ? "text-accent" : undefined}>
+                      {idea.icon ?? "◇"}
+                    </span>
                     <span className="truncate">{idea.title}</span>
                   </button>
                 </li>
@@ -419,9 +431,9 @@ function Sidebar({
         <button
           type="button"
           onClick={() => setThemeOpen(true)}
-          className="mb-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left transition-colors duration-[120ms] ease-standard hover:bg-surface-raised hover:text-text-primary"
+          className="mb-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left transition-colors duration-[120ms] ease-standard hover:bg-accent/10 hover:text-accent"
         >
-          <span aria-hidden>◐</span>
+          <span aria-hidden className="text-accent">◐</span>
           <span>Theme</span>
         </button>
         <div className="truncate" title={vaultRoot}>
@@ -578,7 +590,7 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
           onKeyDown={onKeyDown}
           placeholder="Search ideas, or run a command…"
           spellCheck={false}
-          className="w-full border-b border-border-subtle bg-transparent px-4 py-3 text-base outline-none placeholder:text-text-secondary"
+          className="w-full border-b border-border-subtle bg-transparent px-4 py-3 text-base outline-none placeholder:text-text-secondary focus:border-accent"
         />
         <ul className="max-h-80 overflow-y-auto py-1">
           {commands.length === 0 ? (
@@ -591,12 +603,20 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
                   onMouseEnter={() => setIndex(i)}
                   onClick={c.run}
                   className={[
-                    "flex w-full items-center gap-3 px-4 py-2 text-left text-sm",
+                    "relative flex w-full items-center gap-3 py-2 pr-4 pl-5 text-left text-sm",
                     i === index ? "bg-surface-sunken text-text-primary" : "text-text-secondary",
                   ].join(" ")}
                 >
+                  {i === index && (
+                    <span
+                      aria-hidden
+                      className="absolute top-1.5 bottom-1.5 left-2 w-0.5 rounded-full bg-accent"
+                    />
+                  )}
                   <span className="truncate">{c.label}</span>
-                  <span className="ml-auto text-xs">{c.hint}</span>
+                  <span className={["ml-auto text-xs", i === index ? "text-accent" : ""].join(" ")}>
+                    {c.hint}
+                  </span>
                 </button>
               </li>
             ))
