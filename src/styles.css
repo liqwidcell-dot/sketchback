@@ -95,3 +95,104 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ── Block editor (plan §9) ──────────────────────────────────────────────────
+   `nb-editor` is set via `editorProps.attributes`, so it lands on the
+   contenteditable element itself (ProseMirror appends it to its own
+   `ProseMirror` class) — hence element-level selectors, not a descendant
+   `.ProseMirror` one. Tailwind's preflight strips list markers and margins, so
+   the markdown-shaped content (headings, lists, quotes, code) is styled back
+   here. Everything reads from tokens so themes and accent changes flow through. */
+.nb-editor {
+  outline: none;
+  min-height: 24px;
+  padding: 2px 0;
+}
+
+.nb-editor > * + * {
+  margin-top: 8px;
+}
+
+.nb-editor h1,
+.nb-editor h2,
+.nb-editor h3 {
+  font-weight: 600;
+  line-height: 1.3;
+}
+.nb-editor h1 {
+  font-size: 22px;
+}
+.nb-editor h2 {
+  font-size: 18px;
+}
+.nb-editor h3 {
+  font-size: 16px;
+}
+
+.nb-editor ul,
+.nb-editor ol {
+  padding-left: 22px;
+}
+.nb-editor ul {
+  list-style: disc;
+}
+.nb-editor ol {
+  list-style: decimal;
+}
+.nb-editor li > p {
+  margin: 0;
+}
+
+.nb-editor blockquote {
+  border-left: 2px solid var(--color-border-subtle);
+  padding-left: 12px;
+  color: var(--color-text-secondary);
+}
+
+.nb-editor code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--color-surface-sunken);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.nb-editor pre {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  background: var(--color-surface-sunken);
+  border-radius: 4px;
+  padding: 12px;
+  overflow-x: auto;
+}
+.nb-editor pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.nb-editor hr {
+  border: 0;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.nb-editor a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The Placeholder extension tags empty nodes `is-empty` with a
+   `data-placeholder` label. Each block is its own editor, so every empty block
+   would otherwise shout the hint at once; reveal it only for the focused
+   block, the way Notion does. */
+.nb-editor p.is-empty::before {
+  content: attr(data-placeholder);
+  color: var(--color-text-secondary);
+  pointer-events: none;
+  float: left;
+  height: 0;
+  visibility: hidden;
+}
+.nb-editor:focus p.is-empty::before {
+  visibility: visible;
+}

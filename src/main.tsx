@@ -14,6 +14,12 @@ import { create } from "zustand";
 import Database from "@tauri-apps/plugin-sql";
 import { appConfigDir } from "@tauri-apps/api/path";
 import { getVersion } from "@tauri-apps/api/app";
+import { EditorContent, useEditor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import { Markdown } from "@tiptap/markdown";
+import { Placeholder } from "@tiptap/extension-placeholder";
+import { isAtEndOfNode, type JSONContent } from "@tiptap/core";
+import { generateKeyBetween } from "fractional-indexing";
 import {
   useCallback,
   useEffect,
@@ -153,6 +159,25 @@ export interface IdeaRow {
   updated_at: number;
 }
 
+/** A row from `block` (plan §7). `data_json` is opaque per block type. */
+export interface BlockRow {
+  id: string;
+  idea_id: string;
+  type: string;
+  order_key: string;
+  data_json: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * A `text` block's `data_json` is a ProseMirror document, not markdown: plan §2
+ * rules markdown out as a storage format (it cannot round-trip ink, and a
+ * paragraph is only one of several block types). Markdown still goes in and out
+ * — see `TEXT_BLOCK` and the Markdown extension below.
+ */
+const EMPTY_DOC = JSON.stringify({ type: "doc", content: [{ type: "paragraph" }] });
+
 const SQL = {
   seedVault: `INSERT OR IGNORE INTO vault (id, name, created_at) VALUES ('local', $1, $2)`,
   seedDevice: `INSERT OR IGNORE INTO device (id, name, created_at) VALUES ($1, $2, $3)`,
@@ -162,6 +187,14 @@ const SQL = {
   insertIdea: `INSERT INTO idea (id, title, created_at, updated_at) VALUES ($1, $2, $3, $3)`,
   renameIdea: `UPDATE idea SET title = $1, updated_at = $2 WHERE id = $3`,
   softDeleteIdea: `UPDATE idea SET deleted_at = $1, updated_at = $1 WHERE id = $2`,
+  touchIdea: `UPDATE idea SET updated_at = $1 WHERE id = $2`,
+  listBlocks: `SELECT id, idea_id, type, order_key, data_json, created_at, updated_at
+                 FROM block WHERE idea_id = $1 AND deleted_at IS NULL
+                ORDER BY order_key`,
+  insertBlock: `INSERT INTO block (id, idea_id, type, order_key, data_json, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $6)`,
+  updateBlockData: `UPDATE block SET data_json = $1, updated_at = $2 WHERE id = $3`,
+  softDeleteBlock: `UPDATE block SET deleted_at = $1, updated_at = $1 WHERE id = $2`,
   readPrefs: `SELECT key, value FROM prefs`,
   writePref: `INSERT INTO prefs (key, value, updated_at) VALUES ($1, $2, $3)
               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
@@ -191,6 +224,22 @@ function normalizeHex(input: string): string | null {
   const body = match[1].toLowerCase();
   const full = body.length === 3 ? body.replace(/./g, (c) => c + c) : body;
   return `#${full}`;
+}
+
+/**
+ * Read a stored block back into a ProseMirror doc, falling back to an empty one
+ * rather than letting a malformed row take the editor down.
+ */
+function parseDoc(dataJson: string): JSONContent {
+  try {
+    const parsed: unknown = JSON.parse(dataJson);
+    if (parsed && typeof parsed === "object" && (parsed as JSONContent).type === "doc") {
+      return parsed as JSONContent;
+    }
+  } catch {
+    // Fall through to the empty document.
+  }
+  return JSON.parse(EMPTY_DOC) as JSONContent;
 }
 
 /* ─────────────────────────── Context menu ───────────────────────────────── */
@@ -227,6 +276,12 @@ interface State {
   themeOpen: boolean;
   menu: MenuState | null;
   pendingDelete: IdeaRow | null;
+  blocks: BlockRow[];
+  /** Which idea `blocks` belongs to; guards against a stale async load. */
+  blocksFor: string | null;
+  blocksLoaded: boolean;
+  /** Set after creating a block so the new editor can claim the caret. */
+  focusBlockId: string | null;
   setPalette(open: boolean): void;
   setThemeOpen(open: boolean): void;
   setTheme(mode: ThemeMode): Promise<void>;
@@ -236,6 +291,11 @@ interface State {
   askDelete(idea: IdeaRow): void;
   cancelDelete(): void;
   confirmDelete(): Promise<void>;
+  clearFocusBlock(): void;
+  loadBlocks(ideaId: string): Promise<void>;
+  createTextBlock(ideaId: string, afterId?: string | null): Promise<string>;
+  saveBlockDoc(id: string, doc: JSONContent): Promise<void>;
+  removeBlock(id: string): Promise<void>;
   refresh(): Promise<void>;
   createIdea(title?: string): Promise<string>;
   renameIdea(id: string, title: string): Promise<void>;
@@ -254,6 +314,10 @@ export const useStore = create<State>((set, get) => ({
   themeOpen: false,
   menu: null,
   pendingDelete: null,
+  blocks: [],
+  blocksFor: null,
+  blocksLoaded: false,
+  focusBlockId: null,
 
   setPalette: (open) => set({ paletteOpen: open }),
   setThemeOpen: (open) => set({ themeOpen: open }),
@@ -280,6 +344,89 @@ export const useStore = create<State>((set, get) => ({
   async setAccent(hex) {
     set({ accent: hex });
     await platform.db.run(SQL.writePref, ["accent", JSON.stringify(hex), now()]);
+  },
+
+  clearFocusBlock: () => set({ focusBlockId: null }),
+
+  async loadBlocks(ideaId) {
+    // Claim the request immediately so a slow response for a previous idea
+    // can't overwrite the current one (see the guard below).
+    set({ blocksFor: ideaId, blocks: [], blocksLoaded: false });
+    const rows = await platform.db.all<BlockRow>(SQL.listBlocks, [ideaId]);
+    if (get().blocksFor !== ideaId) return;
+    set({ blocks: rows, blocksLoaded: true });
+  },
+
+  /**
+   * Insert a `text` block after `afterId` (or at the end when omitted). The
+   * order key is generated between its neighbours, so inserting never renumbers
+   * a sibling (plan §9).
+   */
+  async createTextBlock(ideaId, afterId = null) {
+    const blocks = get().blocks;
+    const at = afterId ? blocks.findIndex((b) => b.id === afterId) : -1;
+    let lower: string | null;
+    let upper: string | null = null;
+    if (at >= 0) {
+      lower = blocks[at].order_key;
+      upper = blocks[at + 1]?.order_key ?? null;
+    } else {
+      lower = blocks.length ? blocks[blocks.length - 1].order_key : null;
+    }
+
+    const ts = now();
+    const block: BlockRow = {
+      id: crypto.randomUUID(),
+      idea_id: ideaId,
+      type: "text",
+      order_key: generateKeyBetween(lower, upper),
+      data_json: EMPTY_DOC,
+      created_at: ts,
+      updated_at: ts,
+    };
+
+    // Claim the slot in state *before* awaiting the insert. Two quick Enters
+    // would otherwise both read the same neighbours and mint the same key, and
+    // a duplicate order_key makes ordering unstable.
+    const next = [...blocks];
+    next.splice(at >= 0 ? at + 1 : next.length, 0, block);
+    set({ blocks: next });
+
+    try {
+      await platform.db.run(SQL.insertBlock, [
+        block.id,
+        block.idea_id,
+        block.type,
+        block.order_key,
+        block.data_json,
+        ts,
+      ]);
+    } catch (err) {
+      set({ blocks: get().blocks.filter((b) => b.id !== block.id) });
+      throw err;
+    }
+    return block.id;
+  },
+
+  // Deliberately does not touch the store: the editor is the live source for
+  // its own content, so re-setting `blocks` here would re-render every block on
+  // each keystroke for no gain.
+  async saveBlockDoc(id, doc) {
+    const ts = now();
+    await platform.db.run(SQL.updateBlockData, [JSON.stringify(doc), ts, id]);
+    const ideaId = get().blocks.find((b) => b.id === id)?.idea_id;
+    if (ideaId) await platform.db.run(SQL.touchIdea, [ts, ideaId]);
+  },
+
+  async removeBlock(id) {
+    const previous = get().blocks;
+    set({ blocks: previous.filter((b) => b.id !== id) });
+    try {
+      await platform.db.run(SQL.softDeleteBlock, [now(), id]);
+    } catch (err) {
+      set({ blocks: previous });
+      throw err;
+    }
   },
 
   async refresh() {
@@ -543,17 +690,185 @@ function Sidebar({
   );
 }
 
+/**
+ * Extensions shared by every block. Hoisted so the instances keep their
+ * identity across renders — `useEditor` diffs options by reference, and
+ * rebuilding `Placeholder.configure(...)` each render is pure waste.
+ */
+const BLOCK_EXTENSIONS = [
+  StarterKit,
+  Markdown,
+  // Every block is its own editor, so the hint is CSS-gated to the focused
+  // block (see styles.css) rather than shouted by every empty one.
+  Placeholder.configure({ placeholder: "Write something, or try # for a heading" }),
+];
+
+/**
+ * One `text` block. Per plan §9 each block owns its own TipTap instance, which
+ * is the seam that later lets sketches and audio be atoms in a normal document
+ * rather than the editor fighting foreign DOM.
+ *
+ * Storage is ProseMirror JSON (plan §2 rules markdown out as a *storage*
+ * format). Markdown is still first class: StarterKit supplies the §9 shortcut
+ * set (`#`, `-`, `1.`, `>`, fences, `---`, `**`, `*`, `` ` ``, `~~`), the
+ * Markdown extension supplies an unescape-safe serializer, and "Copy as
+ * Markdown" on the block menu hands the whole block out as markdown.
+ */
+function TextBlock({ block }: { block: BlockRow }) {
+  const openMenu = useStore((s) => s.openMenu);
+  const createTextBlock = useStore((s) => s.createTextBlock);
+  const removeBlock = useStore((s) => s.removeBlock);
+  const saveBlockDoc = useStore((s) => s.saveBlockDoc);
+  const focusBlockId = useStore((s) => s.focusBlockId);
+  const clearFocusBlock = useStore((s) => s.clearFocusBlock);
+  const saveTimer = useRef<number | null>(null);
+  // The most recent document, kept in a ref so the unmount flush never has to
+  // reach for an editor that React may already have destroyed.
+  const latestDoc = useRef<JSONContent | null>(null);
+
+  const editor = useEditor({
+    extensions: BLOCK_EXTENSIONS,
+    content: parseDoc(block.data_json),
+    editorProps: {
+      attributes: { class: "nb-editor" },
+      // Runs before ProseMirror's own keymap (props are resolved before
+      // plugins), so returning true pre-empts the default Enter.
+      handleKeyDown: (view, event) => {
+        if (event.key !== "Enter") return false;
+        if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
+        const { state } = view;
+        if (!state.selection.empty) return false;
+        // A newline inside a code block is content, not a new block.
+        if (state.selection.$from.parent.type.name === "codeBlock") return false;
+        if (!isAtEndOfNode(state)) return false;
+
+        // Enter at the end of a block starts the next one (plan §9).
+        void createTextBlock(block.idea_id, block.id).then((id) => {
+          useStore.setState({ focusBlockId: id });
+        });
+        return true;
+      },
+    },
+    onUpdate: ({ editor }) => {
+      latestDoc.current = editor.getJSON();
+      if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+      saveTimer.current = window.setTimeout(() => {
+        saveTimer.current = null;
+        if (latestDoc.current) void saveBlockDoc(block.id, latestDoc.current);
+      }, 500);
+    },
+  });
+
+  // A freshly created block claims the caret once its editor exists.
+  useEffect(() => {
+    if (!editor || focusBlockId !== block.id) return;
+    editor.commands.focus("start");
+    clearFocusBlock();
+  }, [editor, focusBlockId, block.id, clearFocusBlock]);
+
+  // Flush a pending save if the block unmounts (idea switch, delete) so the
+  // last keystrokes aren't lost to the debounce.
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (latestDoc.current) void saveBlockDoc(block.id, latestDoc.current);
+    };
+  }, [block.id, saveBlockDoc]);
+
+  const copyMarkdown = async () => {
+    const markdown = editor.getMarkdown();
+    try {
+      await navigator.clipboard.writeText(markdown);
+    } catch {
+      // Older webviews reject the async clipboard; fall back to a selection.
+      const scratch = document.createElement("textarea");
+      scratch.value = markdown;
+      scratch.style.position = "fixed";
+      scratch.style.opacity = "0";
+      document.body.appendChild(scratch);
+      scratch.select();
+      document.execCommand("copy");
+      scratch.remove();
+    }
+  };
+
+  const showMenu = (x: number, y: number) => {
+    openMenu(x, y, [
+      {
+        label: "Add block below",
+        onSelect: () => {
+          void createTextBlock(block.idea_id, block.id).then((id) => {
+            useStore.setState({ focusBlockId: id });
+          });
+        },
+      },
+      { label: "Copy as Markdown", onSelect: () => void copyMarkdown() },
+      { label: "Delete block", danger: true, onSelect: () => void removeBlock(block.id) },
+    ]);
+  };
+
+  return (
+    <div
+      className="group relative rounded px-1 py-0.5 transition-colors duration-[120ms] ease-standard hover:bg-surface-raised"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        // Keep the idea-level menu on the article from also firing.
+        e.stopPropagation();
+        showMenu(e.clientX, e.clientY);
+      }}
+    >
+      <button
+        type="button"
+        aria-label="Block actions"
+        onClick={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          showMenu(rect.left, rect.bottom + 4);
+        }}
+        className="absolute top-1 -left-7 hidden rounded px-1.5 py-0.5 text-xs text-text-secondary group-hover:block hover:text-accent"
+      >
+        ⋮
+      </button>
+      <EditorContent editor={editor} />
+    </div>
+  );
+}
+
 function IdeaView({ idea }: { idea: IdeaRow }) {
   const renameIdea = useStore((s) => s.renameIdea);
   const openMenu = useStore((s) => s.openMenu);
   const askDelete = useStore((s) => s.askDelete);
+  const blocks = useStore((s) => s.blocks);
+  const blocksFor = useStore((s) => s.blocksFor);
+  const blocksLoaded = useStore((s) => s.blocksLoaded);
+  const loadBlocks = useStore((s) => s.loadBlocks);
+  const createTextBlock = useStore((s) => s.createTextBlock);
   const [draft, setDraft] = useState(idea.title);
   const titleRef = useRef<HTMLInputElement>(null);
+  const seeded = useRef(false);
 
   useEffect(() => setDraft(idea.title), [idea.id, idea.title]);
+  useEffect(() => {
+    void loadBlocks(idea.id);
+  }, [idea.id, loadBlocks]);
+
+  const ready = blocksFor === idea.id && blocksLoaded;
+
+  // An idea always opens with somewhere to type.
+  useEffect(() => {
+    if (!ready || seeded.current || blocks.length > 0) return;
+    seeded.current = true;
+    void createTextBlock(idea.id).then((id) => useStore.setState({ focusBlockId: id }));
+  }, [ready, blocks.length, idea.id, createTextBlock]);
 
   const commit = () => {
     if (draft.trim() !== idea.title) void renameIdea(idea.id, draft);
+  };
+
+  const appendBlock = () => {
+    void createTextBlock(idea.id).then((id) => useStore.setState({ focusBlockId: id }));
   };
 
   return (
@@ -603,9 +918,32 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
         </button>
       </div>
 
-      <div className="mt-8 flex-1 rounded border border-dashed border-border-subtle p-6 text-sm text-text-secondary">
-        Blocks arrive in week 2 — text, sketch, photo, voice memo, file. This idea is
-        the container they will live in.
+      <div className="mt-8 flex-1">
+        {ready &&
+          blocks.map((block) =>
+            block.type === "text" ? (
+              <TextBlock key={block.id} block={block} />
+            ) : (
+              // Unknown types are shown, never silently dropped — a blank gap
+              // would read as data loss (plan §22's silent-failure theme).
+              <div
+                key={block.id}
+                className="my-1 rounded border border-dashed border-border-subtle px-3 py-2 text-xs text-text-secondary"
+              >
+                {block.type} block
+              </div>
+            ),
+          )}
+
+        {ready && (
+          <button
+            type="button"
+            onClick={appendBlock}
+            className="mt-1 rounded px-1 py-1 text-xs text-text-secondary transition-colors duration-[120ms] ease-standard hover:text-accent"
+          >
+            + Add block
+          </button>
+        )}
       </div>
     </article>
   );
