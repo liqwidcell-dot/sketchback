@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+/* Design tokens — plan §27. Semantic only; components never reference a literal
+   colour. Light is the shipped theme; dark is defined but unused until it earns
+   its keep. */
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --color-surface-base: #faf9f7;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f0efec;
+  --color-border-subtle: #e5e2dc;
+  --color-text-primary: #1c1b19;
+  --color-text-secondary: #6b6862;
+  --color-accent: #3b6ea5;
+  --color-danger: #a5453b;
+
+  /* The one scale, six steps (plan §27). */
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+  --text-base: 15px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 22px;
+  --text-xl--line-height: 32px;
+  --text-2xl: 28px;
+  --text-2xl--line-height: 36px;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-surface-base);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 24px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Motion is a preference: honour the user's. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
