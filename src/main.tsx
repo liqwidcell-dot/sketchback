@@ -2244,8 +2244,9 @@ function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Ctrl+K only. plan §29 says Mod+K, but on this machine Super/Meta+K is
-      // the OS palette, so Meta is deliberately excluded (local divergence).
+      // Ctrl+K is plan §29's `Mod+K`: §29 defines `Mod` as Cmd on macOS and Ctrl
+      // everywhere else. Excluding Meta enforces that (Meta is never `Mod`), so
+      // Super+K stays with the OS palette on this machine.
       if (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPalette(!useStore.getState().paletteOpen);
