@@ -421,7 +421,7 @@ function EmptyState({ onNew }: { onNew: () => void }) {
       <p className="text-xl">An idea notebook.</p>
       <p className="max-w-md text-sm text-text-secondary">
         Every idea is a stack of blocks, and a block can be ink, a photo, a voice memo, or
-        a file. Start one with <kbd className="font-mono text-text-primary">Mod+K</kbd>.
+        a file. Start one with <kbd className="font-mono text-text-primary">Ctrl+K</kbd>.
       </p>
       <button
         type="button"
@@ -556,7 +556,9 @@ function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      // Ctrl+K only. plan §29 says Mod+K, but on this machine Super/Meta+K is
+      // the OS palette, so Meta is deliberately excluded (local divergence).
+      if (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPalette(!useStore.getState().paletteOpen);
       }
