@@ -17,6 +17,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -192,6 +193,26 @@ function normalizeHex(input: string): string | null {
   return `#${full}`;
 }
 
+/* ─────────────────────────── Context menu ───────────────────────────────── */
+
+/**
+ * One right-click menu, shared by every surface that needs one. Plan §9 gives
+ * blocks their own later; "Move to group…" is then a single entry here, which is
+ * why items are plain data rather than bespoke markup.
+ */
+export interface MenuItem {
+  label: string;
+  onSelect: () => void;
+  /** Destructive actions render in the danger colour. */
+  danger?: boolean;
+}
+
+interface MenuState {
+  x: number;
+  y: number;
+  items: MenuItem[];
+}
+
 /* ─────────────────────────────── Store ──────────────────────────────────── */
 
 interface State {
@@ -204,10 +225,17 @@ interface State {
   theme: ThemeMode;
   accent: string | null;
   themeOpen: boolean;
+  menu: MenuState | null;
+  pendingDelete: IdeaRow | null;
   setPalette(open: boolean): void;
   setThemeOpen(open: boolean): void;
   setTheme(mode: ThemeMode): Promise<void>;
   setAccent(hex: string | null): Promise<void>;
+  openMenu(x: number, y: number, items: MenuItem[]): void;
+  closeMenu(): void;
+  askDelete(idea: IdeaRow): void;
+  cancelDelete(): void;
+  confirmDelete(): Promise<void>;
   refresh(): Promise<void>;
   createIdea(title?: string): Promise<string>;
   renameIdea(id: string, title: string): Promise<void>;
@@ -224,9 +252,25 @@ export const useStore = create<State>((set, get) => ({
   theme: "system",
   accent: null,
   themeOpen: false,
+  menu: null,
+  pendingDelete: null,
 
   setPalette: (open) => set({ paletteOpen: open }),
   setThemeOpen: (open) => set({ themeOpen: open }),
+  openMenu: (x, y, items) => set({ menu: { x, y, items } }),
+  closeMenu: () => set({ menu: null }),
+
+  // Deleting is confirmed, not instant (plan §28: `confirmDelete` defaults to
+  // true). The confirm lives here so the sidebar and the idea view share it.
+  askDelete: (idea) => set({ pendingDelete: idea }),
+  cancelDelete: () => set({ pendingDelete: null }),
+
+  async confirmDelete() {
+    const idea = get().pendingDelete;
+    if (!idea) return;
+    set({ pendingDelete: null });
+    await get().deleteIdea(idea.id);
+  },
 
   async setTheme(mode) {
     set({ theme: mode });
@@ -370,6 +414,26 @@ function Sidebar({
   const vaultRoot = useStore((s) => s.vaultRoot);
   const version = useStore((s) => s.version);
   const setThemeOpen = useStore((s) => s.setThemeOpen);
+  const openMenu = useStore((s) => s.openMenu);
+  const renameIdea = useStore((s) => s.renameIdea);
+  const askDelete = useStore((s) => s.askDelete);
+
+  // Inline rename. The flag survives Escape, because unmounting a focused input
+  // can still fire a blur — without it, cancelling would commit the draft.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const cancelledRef = useRef(false);
+
+  const startRename = (id: string) => {
+    cancelledRef.current = false;
+    setRenamingId(id);
+  };
+
+  const commitRename = (id: string, value: string) => {
+    const cancelled = cancelledRef.current;
+    cancelledRef.current = false;
+    setRenamingId(null);
+    if (!cancelled) void renameIdea(id, value);
+  };
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border-subtle bg-surface-sunken">
@@ -397,29 +461,63 @@ function Sidebar({
               const active = idea.id === activeId;
               return (
                 <li key={idea.id}>
-                  <button
-                    type="button"
-                    onClick={() => onOpen(idea.id)}
-                    aria-current={active ? "page" : undefined}
-                    className={[
-                      "relative flex w-full items-center gap-2 rounded py-1 pr-2 pl-3 text-left text-sm",
-                      "transition-colors duration-[120ms] ease-standard",
-                      active
-                        ? "bg-surface-raised text-text-primary shadow-[0_4px_12px_rgb(0_0_0/0.08)]"
-                        : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
-                    ].join(" ")}
-                  >
-                    {active && (
-                      <span
-                        aria-hidden
-                        className="absolute top-1 bottom-1 left-1 w-0.5 rounded-full bg-accent"
-                      />
-                    )}
-                    <span className={active ? "text-accent" : undefined}>
-                      {idea.icon ?? "◇"}
-                    </span>
-                    <span className="truncate">{idea.title}</span>
-                  </button>
+                  {renamingId === idea.id ? (
+                    <input
+                      autoFocus
+                      defaultValue={idea.title}
+                      onFocus={(e) => e.currentTarget.select()}
+                      onBlur={(e) => commitRename(idea.id, e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          e.currentTarget.blur();
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          cancelledRef.current = true;
+                          setRenamingId(null);
+                        }
+                      }}
+                      aria-label="Rename idea"
+                      spellCheck={false}
+                      className="w-full rounded border border-accent bg-surface-raised px-2 py-0.5 text-sm text-text-primary outline-none"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onOpen(idea.id)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        openMenu(e.clientX, e.clientY, [
+                          { label: "Open", onSelect: () => onOpen(idea.id) },
+                          { label: "Rename", onSelect: () => startRename(idea.id) },
+                          {
+                            label: "Delete",
+                            danger: true,
+                            onSelect: () => askDelete(idea),
+                          },
+                        ]);
+                      }}
+                      aria-current={active ? "page" : undefined}
+                      className={[
+                        "relative flex w-full items-center gap-2 rounded py-1 pr-2 pl-3 text-left text-sm",
+                        "transition-colors duration-[120ms] ease-standard",
+                        active
+                          ? "bg-surface-raised text-text-primary shadow-[0_4px_12px_rgb(0_0_0/0.08)]"
+                          : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
+                      ].join(" ")}
+                    >
+                      {active && (
+                        <span
+                          aria-hidden
+                          className="absolute top-1 bottom-1 left-1 w-0.5 rounded-full bg-accent"
+                        />
+                      )}
+                      <span className={active ? "text-accent" : undefined}>
+                        {idea.icon ?? "◇"}
+                      </span>
+                      <span className="truncate">{idea.title}</span>
+                    </button>
+                  )}
                 </li>
               );
             })}
@@ -447,8 +545,10 @@ function Sidebar({
 
 function IdeaView({ idea }: { idea: IdeaRow }) {
   const renameIdea = useStore((s) => s.renameIdea);
-  const deleteIdea = useStore((s) => s.deleteIdea);
+  const openMenu = useStore((s) => s.openMenu);
+  const askDelete = useStore((s) => s.askDelete);
   const [draft, setDraft] = useState(idea.title);
+  const titleRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setDraft(idea.title), [idea.id, idea.title]);
 
@@ -457,8 +557,24 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
   };
 
   return (
-    <article className="mx-auto flex h-full max-w-3xl flex-col px-10 py-8">
+    <article
+      className="mx-auto flex h-full max-w-3xl flex-col px-10 py-8"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openMenu(e.clientX, e.clientY, [
+          {
+            label: "Rename",
+            onSelect: () => {
+              titleRef.current?.focus();
+              titleRef.current?.select();
+            },
+          },
+          { label: "Delete idea", danger: true, onSelect: () => askDelete(idea) },
+        ]);
+      }}
+    >
       <input
+        ref={titleRef}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
@@ -480,7 +596,7 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
         <span>edited {new Date(idea.updated_at).toLocaleString()}</span>
         <button
           type="button"
-          onClick={() => void deleteIdea(idea.id)}
+          onClick={() => askDelete(idea)}
           className="ml-auto transition-colors duration-[120ms] ease-standard hover:text-danger"
         >
           Delete
@@ -734,6 +850,160 @@ function ThemePanel() {
   );
 }
 
+function ContextMenu() {
+  const menu = useStore((s) => s.menu);
+  const closeMenu = useStore((s) => s.closeMenu);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [index, setIndex] = useState(0);
+
+  // Place the panel at the cursor, then pull it back inside the viewport. This
+  // runs before paint, so the clamped position is the only one ever seen.
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!menu || !panel) return;
+    setIndex(0);
+    const { width, height } = panel.getBoundingClientRect();
+    const pad = 6;
+    setPos({
+      x: Math.max(pad, Math.min(menu.x, window.innerWidth - width - pad)),
+      y: Math.max(pad, Math.min(menu.y, window.innerHeight - height - pad)),
+    });
+  }, [menu]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const count = menu.items.length;
+
+    const onDown = (e: MouseEvent) => {
+      if (!panelRef.current?.contains(e.target as Node)) closeMenu();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeMenu();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setIndex((i) => (i + 1) % count);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setIndex((i) => (i - 1 + count) % count);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const item = menu.items[index];
+        closeMenu();
+        item?.onSelect();
+      }
+    };
+
+    // Capture phase, so a click anywhere else dismisses before it does its job.
+    window.addEventListener("mousedown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("blur", closeMenu);
+    return () => {
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("blur", closeMenu);
+    };
+  }, [menu, index, closeMenu]);
+
+  if (!menu) return null;
+
+  return (
+    <div
+      ref={panelRef}
+      role="menu"
+      aria-label="Actions"
+      style={{ left: pos.x, top: pos.y }}
+      className="fixed z-[60] min-w-[11rem] overflow-hidden rounded border border-border-subtle bg-surface-raised py-1 shadow-[0_8px_24px_rgb(0_0_0/0.18)]"
+    >
+      {menu.items.map((item, i) => (
+        <button
+          key={item.label}
+          type="button"
+          role="menuitem"
+          onMouseEnter={() => setIndex(i)}
+          onClick={() => {
+            closeMenu();
+            item.onSelect();
+          }}
+          className={[
+            "block w-full truncate px-3 py-1.5 text-left text-sm",
+            "transition-colors duration-[120ms] ease-standard",
+            item.danger ? "text-danger" : "text-text-primary",
+            i === index ? "bg-surface-sunken" : "",
+          ].join(" ")}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  title,
+  body,
+  confirmLabel = "Delete",
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  body: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgb(0_0_0/0.35)]"
+      onClick={onCancel}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-80 max-w-[92vw] rounded border border-border-subtle bg-surface-raised p-5 shadow-[0_8px_24px_rgb(0_0_0/0.18)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold">{title}</h2>
+        <p className="mt-2 text-sm text-text-secondary">{body}</p>
+        <div className="mt-4 flex justify-end gap-2">
+          {/* Cancel holds focus: a destructive default is a bad default. */}
+          <button
+            type="button"
+            autoFocus
+            onClick={onCancel}
+            className="rounded px-3 py-1.5 text-sm text-text-secondary transition-colors duration-[120ms] ease-standard hover:text-text-primary"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded bg-danger px-3 py-1.5 text-sm text-on-danger transition-opacity duration-[120ms] ease-standard hover:opacity-90"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const { ideaId, navigate } = useHashRoute();
   const ready = useStore((s) => s.ready);
@@ -745,6 +1015,9 @@ function App() {
   const theme = useStore((s) => s.theme);
   const accent = useStore((s) => s.accent);
   const themeOpen = useStore((s) => s.themeOpen);
+  const pendingDelete = useStore((s) => s.pendingDelete);
+  const cancelDelete = useStore((s) => s.cancelDelete);
+  const confirmDelete = useStore((s) => s.confirmDelete);
 
   const selected = useMemo(() => ideas.find((i) => i.id === ideaId) ?? null, [ideas, ideaId]);
 
@@ -807,6 +1080,20 @@ function App() {
         <CommandPalette onClose={() => setPalette(false)} onNavigate={navigate} />
       )}
       {themeOpen && <ThemePanel />}
+      <ContextMenu />
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete idea?"
+          body={`“${pendingDelete.title}” will be deleted. This can’t be undone yet.`}
+          onConfirm={() => {
+            const doomed = pendingDelete.id;
+            void confirmDelete().then(() => {
+              if (doomed === ideaId) navigate("#/");
+            });
+          }}
+          onCancel={cancelDelete}
+        />
+      )}
     </div>
   );
 }
@@ -814,10 +1101,10 @@ function App() {
 /* ──────────────────────────── App chrome ────────────────────────────────── */
 
 // The webview's native context menu is a browser affordance, not a product one:
-// right-click offers Reload / Back / Inspect Element. Suppress it app-wide. A
-// real context menu (duplicate, delete, turn into…) belongs to the block system
-// (plan §9) and will replace this. Trade-off: right-click-to-paste on text
-// fields goes with it; Ctrl/Cmd+V still works.
+// right-click offers Reload / Back / Inspect Element. Suppress it app-wide — our
+// own menu (the `ContextMenu` component) takes over where it matters, and the
+// block system adds its own entries in plan §9. Trade-off: right-click-to-paste
+// on text fields goes with it; Ctrl/Cmd+V still works.
 //
 // Dev escape hatch: this menu was the only way into the web inspector on Linux,
 // so Shift+right-click still opens it while developing. Release builds suppress

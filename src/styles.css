@@ -16,6 +16,7 @@
   --color-accent: #3b6ea5;
   --color-on-accent: #ffffff;
   --color-danger: #a5453b;
+  --color-on-danger: #ffffff;
 
   /* The one scale, six steps (plan §27). */
   --text-xs: 11px;
@@ -54,6 +55,7 @@
   --color-accent: #7aa8d8;
   --color-on-accent: #16161a;
   --color-danger: #d1706a;
+  --color-on-danger: #16161a;
 }
 
 /* The accent's sanctioned homes (plan §27): focus rings, active nav, primary
