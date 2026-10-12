@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core permissions plus the SQL plugin's read/execute surface.",
+  "description": "Core permissions, the SQL plugin's read/execute surface, and the native folder picker used by markdown export. File writing itself is a Rust command, so the fs plugin is deliberately not granted here.",
   "windows": ["main"],
-  "permissions": ["core:default", "sql:default", "sql:allow-execute"]
+  "permissions": ["core:default", "sql:default", "sql:allow-execute", "dialog:default"]
 }

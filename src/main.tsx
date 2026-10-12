@@ -12,13 +12,15 @@
 import { createRoot } from "react-dom/client";
 import { create } from "zustand";
 import Database from "@tauri-apps/plugin-sql";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { appConfigDir } from "@tauri-apps/api/path";
 import { getVersion } from "@tauri-apps/api/app";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { Markdown } from "@tiptap/markdown";
+import { Markdown, MarkdownManager } from "@tiptap/markdown";
 import { Placeholder } from "@tiptap/extension-placeholder";
-import { isAtEndOfNode, type Editor, type JSONContent } from "@tiptap/core";
+import { decodeHtmlEntities, isAtEndOfNode, type Editor, type JSONContent } from "@tiptap/core";
 import { generateKeyBetween } from "fractional-indexing";
 import {
   Fragment,
@@ -44,6 +46,35 @@ export interface MicSession {
   stop(): Promise<Blob>;
 }
 
+/** One file in an export tree. `path` is relative to the export root. */
+export interface ExportTextFile {
+  path: string;
+  contents: string;
+}
+
+/** A file copied out of the local blob store, byte-for-byte (never via IPC). */
+export interface ExportBlobCopy {
+  path: string;
+  source: string;
+}
+
+export interface ExportSummary {
+  /** The exported folder, as it will read in a file manager. */
+  folder: string;
+  /** File names written, in export order. */
+  ideas: string[];
+  bytes: number;
+  blobs: number;
+  linksRewritten: number;
+  /**
+   * Everything the export could not represent faithfully, in plain words:
+   * unresolved links, heading links left as wikilinks, media with no blob, and
+   * block types markdown cannot carry. Plan §17 is explicit that reporting what
+   * did not survive matters more than a silent success.
+   */
+  notes: string[];
+}
+
 /**
  * Every host capability goes through this one interface. Two implementations:
  * `TauriPlatform` (real) and `MemoryPlatform` (the Vitest seam). Week 1 wires
@@ -66,6 +97,11 @@ export interface Platform {
   dialog: {
     pickFiles(): Promise<PickedFile[]>;
     saveFile(name: string, data: Uint8Array): Promise<string | null>;
+    /** Native folder chooser. `null` when the user cancels. */
+    pickDirectory(title: string): Promise<string | null>;
+  };
+  exporter: {
+    writeTree(dest: string, files: ExportTextFile[], blobs: ExportBlobCopy[]): Promise<void>;
   };
   mic: {
     isAvailable(): Promise<boolean>;
@@ -92,6 +128,7 @@ const stubFs = (): Platform["fs"] => ({
 const stubDialog = (): Platform["dialog"] => ({
   pickFiles: notYet("dialog.pickFiles"),
   saveFile: notYet("dialog.saveFile"),
+  pickDirectory: notYet("dialog.pickDirectory"),
 });
 
 const stubMic = (): Platform["mic"] => ({
@@ -116,7 +153,18 @@ export function TauriPlatform(): Platform {
     },
     fs: stubFs(),
     hash: { sha256: notYet("hash.sha256") },
-    dialog: stubDialog(),
+    dialog: {
+      ...stubDialog(),
+      // The picker is the one dialog piece week 2 needs; picking *files* (media
+      // import, §11) and saving single files stay stubbed until then.
+      pickDirectory: async (title) => {
+        const picked = await open({ directory: true, multiple: false, title });
+        return typeof picked === "string" ? picked : null;
+      },
+    },
+    exporter: {
+      writeTree: (dest, files, blobs) => invoke("export_write_tree", { dest, files, blobs }),
+    },
     mic: stubMic(),
     app: {
       vaultRoot: () => appConfigDir(),
@@ -126,23 +174,50 @@ export function TauriPlatform(): Platform {
 }
 
 /**
+ * The in-memory platform, plus the state a test wants to read back.
+ */
+export interface MemoryPlatformHandle extends Platform {
+  /** `"<dest>/<path>"` → file contents. */
+  written: Map<string, string>;
+  /** `"<dest>/<path>"` → the source path that was copied. */
+  copied: Map<string, string>;
+}
+
+/**
  * In-memory Maps, for Vitest in a plain Node process — no webview, no Rust.
  * The row store lands with the test harness in week 3; until then this is the
  * seam and nothing more.
+ *
+ * `exporter` is real rather than stubbed: it is the one capability that is
+ * pure tree-building, so week 3's export tests can assert the exact tree
+ * without a filesystem.
  */
-export function MemoryPlatform(): Platform {
+export function MemoryPlatform(): MemoryPlatformHandle {
   const tables = new Map<string, Map<string, Record<string, unknown>>>();
   void tables; // week 3 fills this in
+  const written = new Map<string, string>();
+  const copied = new Map<string, string>();
   return {
     db: { all: notYet("MemoryPlatform.db.all"), run: notYet("MemoryPlatform.db.run") },
     fs: stubFs(),
     hash: { sha256: notYet("hash.sha256") },
-    dialog: stubDialog(),
+    dialog: {
+      ...stubDialog(),
+      pickDirectory: async () => "memory://vault/export",
+    },
+    exporter: {
+      async writeTree(dest, files, blobs) {
+        for (const file of files) written.set(`${dest}/${file.path}`, file.contents);
+        for (const blob of blobs) copied.set(`${dest}/${blob.path}`, blob.source);
+      },
+    },
     mic: stubMic(),
     app: {
       vaultRoot: async () => "memory://vault",
       version: async () => "0.0.0-memory",
     },
+    written,
+    copied,
   };
 }
 
@@ -263,6 +338,17 @@ interface MenuState {
   items: MenuItem[];
 }
 
+/**
+ * A one-off result message. Export is the first action that has something worth
+ * reporting — plan §17 is explicit that reporting beats silence — and it doubles
+ * as the way a failure is surfaced instead of swallowed.
+ */
+interface Notice {
+  kind: "ok" | "error";
+  title: string;
+  lines: string[];
+}
+
 /* ─────────────────────────────── Store ──────────────────────────────────── */
 
 interface State {
@@ -277,6 +363,9 @@ interface State {
   themeOpen: boolean;
   menu: MenuState | null;
   pendingDelete: IdeaRow | null;
+  /** True while an export is picking a folder or writing. */
+  exporting: boolean;
+  notice: Notice | null;
   blocks: BlockRow[];
   /** Which idea `blocks` belongs to; guards against a stale async load. */
   blocksFor: string | null;
@@ -294,6 +383,8 @@ interface State {
   askDelete(idea: IdeaRow): void;
   cancelDelete(): void;
   confirmDelete(): Promise<void>;
+  dismissNotice(): void;
+  exportIdea(id: string): Promise<void>;
   clearFocusBlock(): void;
   setActiveBlock(id: string | null): void;
   loadBlocks(ideaId: string): Promise<void>;
@@ -318,6 +409,8 @@ export const useStore = create<State>((set, get) => ({
   themeOpen: false,
   menu: null,
   pendingDelete: null,
+  exporting: false,
+  notice: null,
   blocks: [],
   blocksFor: null,
   blocksLoaded: false,
@@ -339,6 +432,39 @@ export const useStore = create<State>((set, get) => ({
     if (!idea) return;
     set({ pendingDelete: null });
     await get().deleteIdea(idea.id);
+  },
+
+  dismissNotice: () => set({ notice: null }),
+
+  /**
+   * Export an idea as a markdown folder (plan §17). Picking a folder is the only
+   * cancellation path and cancelling is not a failure, so it simply stops; a
+   * real failure is reported in the notice rather than thrown into the void.
+   */
+  async exportIdea(id) {
+    if (get().exporting) return;
+    const idea = get().ideas.find((row) => row.id === id);
+    if (!idea) return;
+
+    set({ exporting: true });
+    try {
+      const dest = await platform.dialog.pickDirectory(`Export “${idea.title}” into…`);
+      if (!dest) return;
+      const summary = await exportIdeaTree(idea, dest);
+      set({
+        notice: { kind: "ok", title: `Exported “${idea.title}”`, lines: exportLines(summary) },
+      });
+    } catch (err) {
+      set({
+        notice: {
+          kind: "error",
+          title: "Export failed",
+          lines: [err instanceof Error ? err.message : String(err)],
+        },
+      });
+    } finally {
+      set({ exporting: false });
+    }
   },
 
   async setTheme(mode) {
@@ -570,6 +696,7 @@ function Sidebar({
   const openMenu = useStore((s) => s.openMenu);
   const renameIdea = useStore((s) => s.renameIdea);
   const askDelete = useStore((s) => s.askDelete);
+  const exportIdea = useStore((s) => s.exportIdea);
 
   // Inline rename. The flag survives Escape, because unmounting a focused input
   // can still fire a blur — without it, cancelling would commit the draft.
@@ -643,6 +770,7 @@ function Sidebar({
                         openMenu(e.clientX, e.clientY, [
                           { label: "Open", onSelect: () => onOpen(idea.id) },
                           { label: "Rename", onSelect: () => startRename(idea.id) },
+                          { label: "Export as Markdown…", onSelect: () => void exportIdea(idea.id) },
                           {
                             label: "Delete",
                             danger: true,
@@ -715,6 +843,405 @@ const BLOCK_EXTENSIONS = [
   // block (see styles.css) rather than shouted by every empty one.
   Placeholder.configure({ placeholder: "Write something, or try # for a heading" }),
 ];
+
+/* ────────────── Export (plan §17: the markdown-folder format) ────────────── */
+
+/**
+ * Export an idea as a folder of markdown, Obsidian-ready.
+ *
+ * This is §17's Obsidian import read backwards: the same mapping table,
+ * traversed outward. One `.md` per idea, YAML frontmatter carrying the idea
+ * metadata, `[[wikilinks]]` rewritten to relative markdown links, and an
+ * `attachments/` folder for whatever media the idea carries.
+ *
+ * §17 lists three exports (whole vault, single-idea `.html`, JSON). This is a
+ * deliberate fourth: it is the format that makes the data portable *today*, to
+ * Obsidian or any other tool, and it round-trips through the importer.
+ *
+ * What is honest about the current state: there are no `image`/`audio` blocks
+ * and no blob store yet (plan §11–12), so `attachments/` stays empty and media
+ * references are reported rather than half-exported. The plumbing is here, so
+ * both populate the day those blocks land.
+ */
+
+/** Windows-hostile and Obsidian-hostile characters, plus markdown's `[]`. */
+const BAD_FILENAME_CHARS = /[\\/:*?"<>|#^[\]]/g;
+/** Control characters: invisible in a listing, unopenable in some tools. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+
+/**
+ * A title is user text; a filename is not. This sanitises rather than formats,
+ * so the result is always one valid path segment — plan §18's "never
+ * interpolate user-supplied filenames into paths".
+ */
+function sanitizeFileName(title: string, fallback = "Untitled"): string {
+  const cleaned = title
+    .replace(BAD_FILENAME_CHARS, "")
+    .replace(CONTROL_CHARS, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80)
+    // A trailing dot or space is legal on Linux and a trap on Windows.
+    .replace(/[. ]+$/, "")
+    .trim();
+  return cleaned || fallback;
+}
+
+/**
+ * `Title`, `Title 2`, `Title 3`… Case-insensitively unique, because a vault
+ * synced onto a case-insensitive filesystem silently merges `Note` and `note`.
+ */
+function uniqueFileName(base: string, used: Set<string>): string {
+  const taken = (name: string) => used.has(name.toLowerCase());
+  if (!taken(base)) {
+    used.add(base.toLowerCase());
+    return base;
+  }
+  for (let n = 2; ; n += 1) {
+    const candidate = `${base} ${n}`;
+    if (!taken(candidate)) {
+      used.add(candidate.toLowerCase());
+      return candidate;
+    }
+  }
+}
+
+/**
+ * `[[Target]]`, `[[Target|alias]]`, `[[Target#heading]]`, `![[…]]` (plan §13).
+ *
+ * This matches the *serialized* form, and that is not incidental. The Markdown
+ * extension escapes ``\ ` * _ [ ] ~`` in ordinary text (`encodeTextForMarkdown`
+ * → `escapeMarkdownSyntax`) and deliberately skips that inside code blocks and
+ * `code` marks. So a wikilink the user typed arrives as `\[\[Target\]\]`, and a
+ * `[[Target]]` that is *not* escaped is inside code — where rewriting it would
+ * be wrong. Matching the escaped form is therefore both necessary and exactly
+ * the right filter: code protects itself, with no special case.
+ */
+const ESCAPED_WIKILINK_RE = /(!?)\\\[\\\[([^\n]*?)\\\]\\\]/g;
+
+/** The inverse of `escapeMarkdownSyntax`, for one matched run of text. */
+const MARKDOWN_ESCAPE_RE = /\\([\\`*_[\]~])/g;
+
+function unescapeMarkdownText(text: string): string {
+  // On the way out, entity encoding happens *before* backslash escaping, so on
+  // the way back it comes off *after* unescaping.
+  return decodeHtmlEntities(text.replace(MARKDOWN_ESCAPE_RE, "$1"));
+}
+
+interface WikilinkParts {
+  target: string;
+  heading: string | null;
+  alias: string | null;
+}
+
+interface Wikilink extends WikilinkParts {
+  /** Exactly what the serializer emitted, escapes and all. */
+  raw: string;
+  /** The unescaped inner text, e.g. `Target|alias`. */
+  body: string;
+  embed: boolean;
+}
+
+/** Split a wikilink body into its target, heading and alias (plan §13). */
+function parseWikilinkBody(inner: string): WikilinkParts {
+  const bar = inner.indexOf("|");
+  const head = (bar === -1 ? inner : inner.slice(0, bar)).trim();
+  const alias = bar === -1 ? null : inner.slice(bar + 1);
+  const hash = head.indexOf("#");
+  if (hash === -1) return { target: head, heading: null, alias };
+  return {
+    target: head.slice(0, hash).trim(),
+    heading: head.slice(hash + 1).trim(),
+    alias,
+  };
+}
+
+/** Every wikilink in a block's markdown, as the user wrote it. */
+function extractWikilinks(markdown: string): Wikilink[] {
+  const links: Wikilink[] = [];
+  for (const match of markdown.matchAll(ESCAPED_WIKILINK_RE)) {
+    const body = unescapeMarkdownText(match[2]);
+    links.push({ raw: match[0], embed: match[1] === "!", body, ...parseWikilinkBody(body) });
+  }
+  return links;
+}
+
+/** Extension-checked, so a note embed (`![[Note]]`) is not read as a file. */
+const MEDIA_TARGET_RE =
+  /\.(png|jpe?g|gif|webp|avif|bmp|tiff?|svg|heic|mp3|m4a|aac|wav|ogg|oga|opus|flac|mp4|mov|m4v|webm|mkv|pdf)$/i;
+
+function isMediaTarget(target: string): boolean {
+  return MEDIA_TARGET_RE.test(target.trim());
+}
+
+/** Brackets cannot appear in a wikilink body, but `*` and friends still can. */
+function escapeLinkText(text: string): string {
+  return text.replace(/[\\`*_~]/g, (char) => `\\${char}`);
+}
+
+/**
+ * Plan §17 maps YAML frontmatter onto idea metadata, so exporting it is what
+ * makes export → import lossless. JSON strings are also valid YAML
+ * double-quoted scalars, which handles `:`, `#` and quotes for free.
+ */
+function frontmatter(idea: IdeaRow): string {
+  return [
+    "---",
+    `title: ${JSON.stringify(idea.title)}`,
+    `created: ${new Date(idea.created_at).toISOString()}`,
+    `updated: ${new Date(idea.updated_at).toISOString()}`,
+    "---",
+  ].join("\n");
+}
+
+let headlessMarkdown: MarkdownManager | null = null;
+
+/**
+ * The serializer for blocks that have no live editor. Any mounted block already
+ * has one — the Markdown extension builds it from the same extension list — so
+ * this is only a fallback: an unmounted block still has to serialize correctly,
+ * or a large idea would export short.
+ */
+function markdownManager(): MarkdownManager {
+  for (const editor of blockEditors.values()) return editor.storage.markdown.manager;
+  headlessMarkdown ??= new MarkdownManager({ extensions: BLOCK_EXTENSIONS });
+  return headlessMarkdown;
+}
+
+/**
+ * One block as markdown. A mounted block's editor is the live source — it may
+ * hold keystrokes the 500 ms autosave has not written yet — with the stored
+ * document as the fallback.
+ */
+function blockMarkdown(block: BlockRow): string {
+  const live = blockEditors.get(block.id);
+  if (live) return live.getMarkdown();
+
+  let doc: JSONContent;
+  try {
+    doc = JSON.parse(block.data_json) as JSONContent;
+  } catch (err) {
+    // Never write out half an idea: an unreadable block is a bug to surface,
+    // not content to quietly drop (plan §22).
+    throw new Error(`block ${block.id} has unreadable data_json (${String(err)})`);
+  }
+  return markdownManager().serialize(doc);
+}
+
+/**
+ * One idea's blocks as a single markdown document. Each block is its own editor
+ * (plan §9), so a block boundary is exactly one paragraph break.
+ */
+function ideaMarkdown(blocks: BlockRow[], unsupported: Record<string, number>): string {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === "text") {
+      parts.push(blockMarkdown(block));
+      continue;
+    }
+    // An honest gap rather than an invisible one (plan §22): the type is
+    // counted in the report and the spot is marked in the file. Every markdown
+    // renderer ignores an HTML comment.
+    unsupported[block.type] = (unsupported[block.type] ?? 0) + 1;
+    parts.push(`<!-- sketchback: a ${block.type} block sits here; markdown cannot represent it -->`);
+  }
+  return parts
+    .map((part) => part.replace(/\s+$/, ""))
+    .filter((part) => part !== "")
+    .join("\n\n");
+}
+
+interface LinkStats {
+  rewritten: number;
+  kept: string[];
+  unresolved: string[];
+  missing: string[];
+}
+
+/**
+ * Rewrite resolved `[[wikilinks]]` into relative markdown links.
+ *
+ * Standard links are the target because the export is for "Obsidian *or any
+ * other tool*": Obsidian understands both, other tools only understand the
+ * first. Where converting would lose meaning the wikilink is written back in
+ * Obsidian's own syntax — where it still resolves — and reported, rather than
+ * quietly mangled.
+ */
+function rewriteWikilinks(
+  markdown: string,
+  resolveFile: (target: string) => string | null,
+  stats: LinkStats,
+): string {
+  return markdown.replace(ESCAPED_WIKILINK_RE, (raw: string, bang: string, inner: string) => {
+    const body = unescapeMarkdownText(inner);
+    const { target, heading, alias } = parseWikilinkBody(body);
+    if (!target) return raw;
+
+    // Written back the way Obsidian writes it — a plain `[[…]]`, not an escaped
+    // one — so it still behaves as a link (or an unresolved link) there.
+    const keep = () => `${bang}[[${body}]]`;
+
+    // A media embed (`![[photo.png]]`). The blob store is plan §12 and does not
+    // exist yet, so there is genuinely nothing to copy; pointing at a file that
+    // is not there would be worse than leaving the embed as it stands.
+    if (isMediaTarget(target)) {
+      stats.missing.push(target);
+      return keep();
+    }
+
+    // `[[Note#Heading]]`. Markdown has no equivalent of Obsidian's heading link,
+    // so it stays a wikilink — and the note is exported beside it, so it keeps
+    // working inside Obsidian.
+    if (heading) {
+      stats.kept.push(target);
+      return keep();
+    }
+
+    const file = resolveFile(target);
+    if (!file) {
+      stats.unresolved.push(target);
+      return keep();
+    }
+
+    stats.rewritten += 1;
+    // An `![[Note]]` transclusion degrades to a plain link: the only faithful
+    // markdown equivalent, and the note itself is in the folder.
+    return `[${escapeLinkText(alias ?? target)}](${encodeURI(file)})`;
+  });
+}
+
+/** How many ideas one export follows links through before it stops. */
+const MAX_EXPORT_IDEAS = 200;
+
+/** `a, b, c +3 more` — a report line, not an exhaustive list. */
+function summarizeList(items: string[], max = 4): string {
+  const unique = [...new Set(items)];
+  const shown = unique.slice(0, max).join(", ");
+  return unique.length > max ? `${shown} +${unique.length - max} more` : shown;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} kB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * Every block of `ideaId`. The open idea is read from the store first, so a
+ * block created moments ago is included even if its insert is still in flight.
+ */
+async function blocksForIdea(ideaId: string): Promise<BlockRow[]> {
+  const live = useStore.getState();
+  if (live.blocksFor === ideaId && live.blocksLoaded) return live.blocks;
+  return platform.db.all<BlockRow>(SQL.listBlocks, [ideaId]);
+}
+
+/** Build the export tree and write it. Returns what happened, to be reported. */
+async function exportIdeaTree(idea: IdeaRow, destParent: string): Promise<ExportSummary> {
+  const folder = sanitizeFileName(idea.title);
+  const unsupported: Record<string, number> = {};
+  const stats: LinkStats = { rewritten: 0, kept: [], unresolved: [], missing: [] };
+
+  // Resolve `[[Title]]` against every live idea (plan §13). Matched
+  // case-insensitively, because nobody types titles consistently.
+  const byTitle = new Map<string, IdeaRow>();
+  for (const row of await platform.db.all<IdeaRow>(SQL.listIdeas)) {
+    const key = row.title.trim().toLowerCase();
+    if (key && !byTitle.has(key)) byTitle.set(key, row);
+  }
+
+  // Pass 1: walk the link graph. Every file name must be known before any link
+  // is rewritten, and the walk has to happen before the write so a link to an
+  // idea can point at a file that definitely exists. Order is breadth-first
+  // from the idea the user asked for.
+  const byId = new Map<string, IdeaRow>();
+  const markdownById = new Map<string, string>();
+  const nameById = new Map<string, string>();
+  const usedNames = new Set<string>();
+  const queue: IdeaRow[] = [idea];
+
+  while (queue.length > 0 && byId.size < MAX_EXPORT_IDEAS) {
+    const current = queue.shift() as IdeaRow;
+    if (byId.has(current.id)) continue;
+    byId.set(current.id, current);
+
+    const markdown = ideaMarkdown(await blocksForIdea(current.id), unsupported);
+    markdownById.set(current.id, markdown);
+    nameById.set(current.id, uniqueFileName(sanitizeFileName(current.title), usedNames));
+
+    for (const link of extractWikilinks(markdown)) {
+      if (!link.target || isMediaTarget(link.target)) continue;
+      const linked = byTitle.get(link.target.toLowerCase());
+      if (linked && !byId.has(linked.id)) queue.push(linked);
+    }
+  }
+
+  const truncated = byId.size >= MAX_EXPORT_IDEAS;
+
+  const resolveFile = (target: string): string | null => {
+    const linked = byTitle.get(target.trim().toLowerCase());
+    const name = linked ? nameById.get(linked.id) : undefined;
+    return name ? `${name}.md` : null;
+  };
+
+  // Pass 2: rewrite links, prepend frontmatter, assemble.
+  const files: ExportTextFile[] = [];
+  const encoder = new TextEncoder();
+  let bytes = 0;
+
+  for (const [id, markdown] of markdownById) {
+    const contents = `${frontmatter(byId.get(id) as IdeaRow)}\n\n${rewriteWikilinks(markdown, resolveFile, stats)}\n`;
+    bytes += encoder.encode(contents).length;
+    files.push({ path: `${folder}/${nameById.get(id)}.md`, contents });
+  }
+
+  // Empty until media blocks exist (plan §11–12): the folder appears on the day
+  // there is something to put in it, rather than as an empty directory.
+  const blobs: ExportBlobCopy[] = [];
+
+  await platform.exporter.writeTree(destParent, files, blobs);
+
+  const notes: string[] = [];
+  if (stats.unresolved.length > 0) {
+    notes.push(`Links to ideas that don't exist: ${summarizeList(stats.unresolved)}`);
+  }
+  if (stats.kept.length > 0) {
+    notes.push(`Heading links left as [[wikilinks]]: ${summarizeList(stats.kept)}`);
+  }
+  if (stats.missing.length > 0) {
+    notes.push(`Media referenced but not in the vault: ${summarizeList(stats.missing)}`);
+  }
+  for (const [type, count] of Object.entries(unsupported)) {
+    notes.push(`${count} ${type} block${count === 1 ? "" : "s"} could not be written as markdown`);
+  }
+  if (truncated) {
+    notes.push(`Stopped after ${MAX_EXPORT_IDEAS} ideas; the rest of the link graph was not followed`);
+  }
+
+  return {
+    folder: `${destParent}/${folder}`,
+    ideas: [...nameById.values()].map((name) => `${name}.md`),
+    bytes,
+    blobs: blobs.length,
+    linksRewritten: stats.rewritten,
+    notes,
+  };
+}
+
+/** The report lines shown after an export, in reading order. */
+function exportLines(summary: ExportSummary): string[] {
+  const lines = [
+    `${summary.ideas.length} file${summary.ideas.length === 1 ? "" : "s"}, ${formatBytes(summary.bytes)}`,
+    summary.folder,
+  ];
+  if (summary.linksRewritten > 0) {
+    lines.push(`${summary.linksRewritten} link${summary.linksRewritten === 1 ? "" : "s"} rewritten`);
+  }
+  if (summary.blobs > 0) {
+    lines.push(`${summary.blobs} attachment${summary.blobs === 1 ? "" : "s"} copied`);
+  }
+  return [...lines, ...summary.notes];
+}
 
 /**
  * One `text` block. Per plan §9 each block owns its own TipTap instance, which
@@ -870,6 +1397,7 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
   const blocksLoaded = useStore((s) => s.blocksLoaded);
   const loadBlocks = useStore((s) => s.loadBlocks);
   const createTextBlock = useStore((s) => s.createTextBlock);
+  const exportIdea = useStore((s) => s.exportIdea);
   const [draft, setDraft] = useState(idea.title);
   const titleRef = useRef<HTMLInputElement>(null);
   const seeded = useRef(false);
@@ -909,6 +1437,7 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
               titleRef.current?.select();
             },
           },
+          { label: "Export as Markdown…", onSelect: () => void exportIdea(idea.id) },
           { label: "Delete idea", danger: true, onSelect: () => askDelete(idea) },
         ]);
       }}
@@ -936,8 +1465,15 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
         <span>edited {new Date(idea.updated_at).toLocaleString()}</span>
         <button
           type="button"
+          onClick={() => void exportIdea(idea.id)}
+          className="ml-auto transition-colors duration-[120ms] ease-standard hover:text-accent"
+        >
+          Export as Markdown
+        </button>
+        <button
+          type="button"
           onClick={() => askDelete(idea)}
-          className="ml-auto transition-colors duration-[120ms] ease-standard hover:text-danger"
+          className="transition-colors duration-[120ms] ease-standard hover:text-danger"
         >
           Delete
         </button>
@@ -1129,11 +1665,21 @@ function normalizeHref(input: string): string {
   return `https://${trimmed}`;
 }
 
-function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNavigate: (h: string) => void }) {
+function CommandPalette({
+  onClose,
+  onNavigate,
+  openIdea,
+}: {
+  onClose: () => void;
+  onNavigate: (h: string) => void;
+  /** The idea in view, or null on the empty state — export needs a subject. */
+  openIdea: IdeaRow | null;
+}) {
   const ideas = useStore((s) => s.ideas);
   const blocks = useStore((s) => s.blocks);
   const activeBlockId = useStore((s) => s.activeBlockId);
   const createIdea = useStore((s) => s.createIdea);
+  const exportIdea = useStore((s) => s.exportIdea);
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   // Non-null while collecting the URL for the Link command.
@@ -1164,6 +1710,20 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
         },
       },
     ];
+
+    // Only offered with an idea in view — there would be nothing to export.
+    if (openIdea) {
+      all.push({
+        id: "__export",
+        label: "Export as Markdown folder",
+        hint: "obsidian",
+        keywords: ["export", "markdown", "md", "obsidian", "folder", "vault", "save", "download"],
+        run: () => {
+          void exportIdea(openIdea.id);
+          onClose();
+        },
+      });
+    }
 
     // Only offered when there is a block to format — otherwise they would be
     // commands that cannot do anything.
@@ -1215,7 +1775,7 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
         c.label.toLowerCase().includes(needle) ||
         (c.keywords ?? []).some((k) => k.toLowerCase().includes(needle)),
     );
-  }, [ideas, target, query, createIdea, onNavigate, onClose]);
+  }, [ideas, target, query, createIdea, onNavigate, onClose, openIdea, exportIdea]);
 
   // Headings are derived rather than stored: one renders only where the group
   // actually changes, so filtering can never leave a heading with nothing under
@@ -1609,6 +2169,58 @@ function ConfirmDialog({
   );
 }
 
+/**
+ * The one-off result panel. It sits opposite the sidebar so it never covers the
+ * thing you just acted on, and it stays until dismissed — an export report that
+ * vanishes is a report nobody read. Escape and the ✕ both close it.
+ */
+function NoticePanel() {
+  const notice = useStore((s) => s.notice);
+  const dismissNotice = useStore((s) => s.dismissNotice);
+
+  useEffect(() => {
+    if (!notice) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismissNotice();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [notice, dismissNotice]);
+
+  if (!notice) return null;
+  const failed = notice.kind === "error";
+
+  return (
+    <div
+      role={failed ? "alert" : "status"}
+      aria-label={notice.title}
+      className="fixed right-4 bottom-4 z-[65] w-[24rem] max-w-[92vw] rounded border border-border-subtle bg-surface-raised p-4 shadow-[0_8px_24px_rgb(0_0_0/0.18)]"
+    >
+      <div className="flex items-start gap-2">
+        <span aria-hidden className={failed ? "text-danger" : "text-accent"}>
+          {failed ? "!" : "✓"}
+        </span>
+        <h2 className="text-sm font-semibold">{notice.title}</h2>
+        <button
+          type="button"
+          onClick={dismissNotice}
+          aria-label="Dismiss"
+          className="ml-auto text-xs text-text-secondary transition-colors duration-[120ms] ease-standard hover:text-text-primary"
+        >
+          ✕
+        </button>
+      </div>
+      {notice.lines.length > 0 && (
+        <ul className="mt-2 space-y-1 text-xs break-words text-text-secondary">
+          {notice.lines.map((line, i) => (
+            <li key={i}>{line}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const { ideaId, navigate } = useHashRoute();
   const ready = useStore((s) => s.ready);
@@ -1682,10 +2294,15 @@ function App() {
         )}
       </main>
       {paletteOpen && (
-        <CommandPalette onClose={() => setPalette(false)} onNavigate={navigate} />
+        <CommandPalette
+          onClose={() => setPalette(false)}
+          onNavigate={navigate}
+          openIdea={selected}
+        />
       )}
       {themeOpen && <ThemePanel />}
       <ContextMenu />
+      <NoticePanel />
       {pendingDelete && (
         <ConfirmDialog
           title="Delete idea?"

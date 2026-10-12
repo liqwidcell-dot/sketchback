@@ -4,6 +4,8 @@
 // handle and, later, blob IO, hashing, fs watch and mic fallback. For week 1 the
 // only real job is the schema: the full DDL from plan §7 as migration v1.
 
+use serde::Deserialize;
+use std::path::{Component, Path, PathBuf};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 /// Plan §7. Two deliberate edits to the plan's listing:
@@ -183,6 +185,106 @@ CREATE TABLE IF NOT EXISTS prefs (
 );
 "#;
 
+/* ─────────────── Export (plan §17: the markdown-folder format) ───────────── */
+
+// The frontend builds the file list; Rust only writes it. Writing here rather
+// than through `tauri-plugin-fs` keeps that plugin's scope model out of the
+// picture — the destination is a folder the user just picked, and a plain
+// `std::fs` write is both correct and easy to reason about.
+//
+// Every path that arrives is *user-derived*: a sanitised idea title becomes a
+// filename. Plan §18 says never interpolate user-supplied names into paths, so
+// each one is re-validated here rather than trusted from the frontend.
+
+#[derive(Debug, Deserialize)]
+pub struct ExportTextFile {
+    /// Path relative to the export root, e.g. `My Idea/My Idea.md`.
+    pub path: String,
+    pub contents: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportBlobCopy {
+    /// Path relative to the export root, e.g. `My Idea/attachments/kitchen.png`.
+    pub path: String,
+    /// Absolute path of the blob on this machine. Rust does the copying, so a
+    /// multi-megabyte photo never crosses the IPC boundary.
+    pub source: String,
+}
+
+/// Join `rel` onto `root`, refusing anything that could write outside `root`.
+fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return Err(format!("refusing absolute export path: {rel}"));
+    }
+    let mut out = root.to_path_buf();
+    for component in rel_path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            // `a/./b` is harmless; anything else (`..`, a root or Windows
+            // prefix) is refused rather than quietly cleaned, because a cleaned
+            // path is how traversal bugs hide.
+            Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "refusing export path that escapes the destination folder: {rel}"
+                ))
+            }
+        }
+    }
+    if out == root {
+        return Err(format!("refusing to write the destination itself: {rel}"));
+    }
+    Ok(out)
+}
+
+/// The whole write, as a plain function so it can be tested without a webview.
+fn write_tree(root: &Path, files: &[ExportTextFile], blobs: &[ExportBlobCopy]) -> Result<(), String> {
+    if !root.is_dir() {
+        return Err(format!("not a folder: {}", root.display()));
+    }
+
+    for file in files {
+        let full = safe_join(root, &file.path)?;
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&full, file.contents.as_bytes())
+            .map_err(|e| format!("could not write {}: {e}", full.display()))?;
+    }
+
+    for blob in blobs {
+        let target = safe_join(root, &blob.path)?;
+        let source = Path::new(&blob.source);
+        if !source.is_file() {
+            return Err(format!("missing source file: {}", source.display()));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(source, &target)
+            .map_err(|e| format!("could not copy {}: {e}", target.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Write an exported idea — its markdown files plus any blobs — into `dest`.
+///
+/// `async` so the write happens off the main thread; the untouched UI matters
+/// on the day an idea carries twenty photos (plan §17).
+#[tauri::command]
+async fn export_write_tree(
+    dest: String,
+    files: Vec<ExportTextFile>,
+    blobs: Vec<ExportBlobCopy>,
+) -> Result<(), String> {
+    write_tree(Path::new(&dest), &files, &blobs)
+}
+
 fn main() {
     let migrations = vec![
         Migration {
@@ -200,12 +302,128 @@ fn main() {
     ];
 
     tauri::Builder::default()
+        // The native folder picker for export (plan §4's `dialog` capability).
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 // The key must match the connection string the frontend loads.
                 .add_migrations("sqlite:sketchback.db", migrations)
                 .build(),
         )
+        .invoke_handler(tauri::generate_handler![export_write_tree])
         .run(tauri::generate_context!())
         .expect("error while running sketchback");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sketchback-export-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn text(path: &str, contents: &str) -> ExportTextFile {
+        ExportTextFile {
+            path: path.to_string(),
+            contents: contents.to_string(),
+        }
+    }
+
+    #[test]
+    fn writes_nested_files_and_their_folders() {
+        let root = scratch("nested");
+        write_tree(
+            &root,
+            &[
+                text("My Idea/My Idea.md", "# Hello\n"),
+                text("My Idea/Second.md", "world\n"),
+            ],
+            &[],
+        )
+        .expect("write");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("My Idea/My Idea.md")).unwrap(),
+            "# Hello\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("My Idea/Second.md")).unwrap(),
+            "world\n"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn copies_blobs_into_the_export() {
+        let root = scratch("blobs");
+        let source = root.join("source.bin");
+        std::fs::write(&source, b"\x00\x01\x02raw bytes").unwrap();
+
+        write_tree(
+            &root,
+            &[text("Idea/Idea.md", "body")],
+            &[ExportBlobCopy {
+                path: "Idea/attachments/photo.png".into(),
+                source: source.display().to_string(),
+            }],
+        )
+        .expect("write");
+
+        // Byte-for-byte, not text-decoded: a blob is binary.
+        assert_eq!(
+            std::fs::read(root.join("Idea/attachments/photo.png")).unwrap(),
+            b"\x00\x01\x02raw bytes"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn refuses_to_escape_the_destination() {
+        let root = scratch("escape");
+        for bad in [
+            "../outside.md",
+            "Idea/../../outside.md",
+            "/etc/passwd",
+            "..",
+        ] {
+            let err = write_tree(&root, &[text(bad, "x")], &[]);
+            assert!(err.is_err(), "{bad} should have been refused");
+        }
+        // Nothing leaked above the root.
+        assert!(!root.join("..").join("outside.md").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn refuses_a_missing_blob_source() {
+        let root = scratch("missing");
+        let err = write_tree(
+            &root,
+            &[],
+            &[ExportBlobCopy {
+                path: "Idea/attachments/gone.png".into(),
+                source: root.join("nope.png").display().to_string(),
+            }],
+        );
+        assert!(err.is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn safe_join_accepts_ordinary_relative_paths() {
+        let root = Path::new("/tmp/root");
+        assert_eq!(
+            safe_join(root, "a/b.md").unwrap(),
+            PathBuf::from("/tmp/root/a/b.md")
+        );
+        // `.` segments are dropped, not treated as an escape.
+        assert_eq!(
+            safe_join(root, "a/./b.md").unwrap(),
+            PathBuf::from("/tmp/root/a/b.md")
+        );
+    }
 }
