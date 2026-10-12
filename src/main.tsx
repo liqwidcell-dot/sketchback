@@ -811,5 +811,21 @@ function App() {
   );
 }
 
+/* ──────────────────────────── App chrome ────────────────────────────────── */
+
+// The webview's native context menu is a browser affordance, not a product one:
+// right-click offers Reload / Back / Inspect Element. Suppress it app-wide. A
+// real context menu (duplicate, delete, turn into…) belongs to the block system
+// (plan §9) and will replace this. Trade-off: right-click-to-paste on text
+// fields goes with it; Ctrl/Cmd+V still works.
+//
+// Dev escape hatch: this menu was the only way into the web inspector on Linux,
+// so Shift+right-click still opens it while developing. Release builds suppress
+// unconditionally.
+window.addEventListener("contextmenu", (e) => {
+  if (import.meta.env.DEV && e.shiftKey) return;
+  e.preventDefault();
+});
+
 createRoot(document.getElementById("root")!).render(<App />);
 void boot();
