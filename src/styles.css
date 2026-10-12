@@ -14,6 +14,7 @@
   --color-text-primary: #1c1b19;
   --color-text-secondary: #6b6862;
   --color-accent: #3b6ea5;
+  --color-on-accent: #ffffff;
   --color-danger: #a5453b;
 
   /* The one scale, six steps (plan §27). */
@@ -35,6 +36,24 @@
 
 :root {
   color-scheme: light;
+}
+
+/* Theme. <html data-theme> flips the whole token set; the accent is overridden
+   at runtime as an inline custom property (see applyAccent in main.tsx), so one
+   hex drives every accent-coloured pixel. Dark is its own palette, not an
+   inversion — it gets a lighter accent because the light-mode blue vibrates
+   against #16161a (plan §27). */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-surface-base: #16161a;
+  --color-surface-raised: #1e1e23;
+  --color-surface-sunken: #101014;
+  --color-border-subtle: #2a2a31;
+  --color-text-primary: #e8e6e3;
+  --color-text-secondary: #9a978f;
+  --color-accent: #7aa8d8;
+  --color-on-accent: #16161a;
+  --color-danger: #d1706a;
 }
 
 html,

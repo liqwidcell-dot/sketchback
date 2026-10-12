@@ -172,13 +172,32 @@ CREATE TABLE IF NOT EXISTS setting (
 );
 "#;
 
+/// Plan §28. Note: §7's DDL calls this table `setting`; §28 calls it `prefs`.
+/// The spec disagrees with itself — §28 is the preferences spec, so `prefs`
+/// wins and `setting` is left in place for later non-preference key/values.
+const PREFS: &str = r#"
+CREATE TABLE IF NOT EXISTS prefs (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+"#;
+
 fn main() {
-    let migrations = vec![Migration {
-        version: 1,
-        description: "initial_schema",
-        sql: SCHEMA,
-        kind: MigrationKind::Up,
-    }];
+    let migrations = vec![
+        Migration {
+            version: 1,
+            description: "initial_schema",
+            sql: SCHEMA,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 2,
+            description: "prefs",
+            sql: PREFS,
+            kind: MigrationKind::Up,
+        },
+    ];
 
     tauri::Builder::default()
         .plugin(

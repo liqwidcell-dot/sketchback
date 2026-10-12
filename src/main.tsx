@@ -161,9 +161,36 @@ const SQL = {
   insertIdea: `INSERT INTO idea (id, title, created_at, updated_at) VALUES ($1, $2, $3, $3)`,
   renameIdea: `UPDATE idea SET title = $1, updated_at = $2 WHERE id = $3`,
   softDeleteIdea: `UPDATE idea SET deleted_at = $1, updated_at = $1 WHERE id = $2`,
+  readPrefs: `SELECT key, value FROM prefs`,
+  writePref: `INSERT INTO prefs (key, value, updated_at) VALUES ($1, $2, $3)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
 } as const;
 
 const now = () => Date.now();
+
+/* ──────────────────────────── Theme (plan §27–28) ───────────────────────── */
+
+export type ThemeMode = "light" | "dark" | "system";
+
+/** `null` accent means "whatever the theme's default is" (plan §28). */
+const THEME_ACCENT: Record<"light" | "dark", string> = {
+  light: "#3b6ea5",
+  dark: "#7aa8d8",
+};
+
+function resolveTheme(mode: ThemeMode): "light" | "dark" {
+  if (mode !== "system") return mode;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+/** Accepts `abc`, `#abc`, `aabbcc`, `#aabbcc`; returns `#aabbcc` or null. */
+function normalizeHex(input: string): string | null {
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(input.trim());
+  if (!match) return null;
+  const body = match[1].toLowerCase();
+  const full = body.length === 3 ? body.replace(/./g, (c) => c + c) : body;
+  return `#${full}`;
+}
 
 /* ─────────────────────────────── Store ──────────────────────────────────── */
 
@@ -174,7 +201,13 @@ interface State {
   vaultRoot: string;
   version: string;
   paletteOpen: boolean;
+  theme: ThemeMode;
+  accent: string | null;
+  themeOpen: boolean;
   setPalette(open: boolean): void;
+  setThemeOpen(open: boolean): void;
+  setTheme(mode: ThemeMode): Promise<void>;
+  setAccent(hex: string | null): Promise<void>;
   refresh(): Promise<void>;
   createIdea(title?: string): Promise<string>;
   renameIdea(id: string, title: string): Promise<void>;
@@ -188,8 +221,22 @@ export const useStore = create<State>((set, get) => ({
   vaultRoot: "",
   version: "",
   paletteOpen: false,
+  theme: "system",
+  accent: null,
+  themeOpen: false,
 
   setPalette: (open) => set({ paletteOpen: open }),
+  setThemeOpen: (open) => set({ themeOpen: open }),
+
+  async setTheme(mode) {
+    set({ theme: mode });
+    await platform.db.run(SQL.writePref, ["theme", JSON.stringify(mode), now()]);
+  },
+
+  async setAccent(hex) {
+    set({ accent: hex });
+    await platform.db.run(SQL.writePref, ["accent", JSON.stringify(hex), now()]);
+  },
 
   async refresh() {
     set({ ideas: await platform.db.all<IdeaRow>(SQL.listIdeas) });
@@ -250,8 +297,20 @@ async function boot(): Promise<void> {
       )
       .catch((e) => console.warn("FTS5 unavailable; search disabled:", e));
 
+    // Preferences (plan §28). Values are JSON-encoded scalars.
+    let theme: ThemeMode = "system";
+    let accent: string | null = null;
+    for (const row of await platform.db.all<{ key: string; value: string }>(SQL.readPrefs)) {
+      try {
+        if (row.key === "theme") theme = JSON.parse(row.value) as ThemeMode;
+        else if (row.key === "accent") accent = JSON.parse(row.value) as string | null;
+      } catch {
+        // A malformed row should never block boot; fall back to the default.
+      }
+    }
+
     await useStore.getState().refresh();
-    useStore.setState({ ready: true, vaultRoot, version });
+    useStore.setState({ ready: true, vaultRoot, version, theme, accent });
   } catch (e) {
     useStore.setState({ ready: true, error: e instanceof Error ? e.message : String(e) });
   }
@@ -310,6 +369,7 @@ function Sidebar({
   const ideas = useStore((s) => s.ideas);
   const vaultRoot = useStore((s) => s.vaultRoot);
   const version = useStore((s) => s.version);
+  const setThemeOpen = useStore((s) => s.setThemeOpen);
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border-subtle bg-surface-sunken">
@@ -356,6 +416,14 @@ function Sidebar({
       </nav>
 
       <footer className="border-t border-border-subtle px-3 py-2 text-xs text-text-secondary">
+        <button
+          type="button"
+          onClick={() => setThemeOpen(true)}
+          className="mb-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left transition-colors duration-[120ms] ease-standard hover:bg-surface-raised hover:text-text-primary"
+        >
+          <span aria-hidden>◐</span>
+          <span>Theme</span>
+        </button>
         <div className="truncate" title={vaultRoot}>
           {vaultRoot || "—"}
         </div>
@@ -426,7 +494,7 @@ function EmptyState({ onNew }: { onNew: () => void }) {
       <button
         type="button"
         onClick={onNew}
-        className="rounded bg-accent px-3 py-1.5 text-sm text-white transition-opacity duration-[120ms] ease-standard hover:opacity-90"
+        className="rounded bg-accent px-3 py-1.5 text-sm text-on-accent transition-opacity duration-[120ms] ease-standard hover:opacity-90"
       >
         New idea
       </button>
@@ -539,6 +607,113 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
   );
 }
 
+const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
+  { value: "light", label: "Day" },
+  { value: "dark", label: "Night" },
+  { value: "system", label: "System" },
+];
+
+function ThemePanel() {
+  const theme = useStore((s) => s.theme);
+  const accent = useStore((s) => s.accent);
+  const setTheme = useStore((s) => s.setTheme);
+  const setAccent = useStore((s) => s.setAccent);
+  const setThemeOpen = useStore((s) => s.setThemeOpen);
+  const [hexDraft, setHexDraft] = useState(accent ?? "");
+
+  useEffect(() => setHexDraft(accent ?? ""), [accent]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setThemeOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setThemeOpen]);
+
+  const resolved = resolveTheme(theme);
+  const effective = accent ?? THEME_ACCENT[resolved];
+
+  const commitHex = () => {
+    const normalized = normalizeHex(hexDraft);
+    if (normalized) void setAccent(normalized);
+    else setHexDraft(accent ?? "");
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(0_0_0/0.35)] pt-[12vh]"
+      onClick={() => setThemeOpen(false)}
+    >
+      <div
+        role="dialog"
+        aria-label="Theme"
+        className="w-[26rem] max-w-[92vw] rounded border border-border-subtle bg-surface-raised p-5 shadow-[0_4px_12px_rgb(0_0_0/0.08)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold">Theme</h2>
+
+        <p className="mt-4 text-xs uppercase tracking-wide text-text-secondary">Appearance</p>
+        <div className="mt-2 grid grid-cols-3 gap-1 rounded border border-border-subtle p-1">
+          {THEME_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => void setTheme(option.value)}
+              aria-pressed={theme === option.value}
+              className={[
+                "rounded px-2 py-1.5 text-sm transition-colors duration-[120ms] ease-standard",
+                theme === option.value
+                  ? "bg-accent text-on-accent"
+                  : "text-text-secondary hover:text-text-primary",
+              ].join(" ")}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        <p className="mt-5 text-xs uppercase tracking-wide text-text-secondary">Accent</p>
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            type="color"
+            aria-label="Accent colour"
+            value={effective}
+            onChange={(e) => void setAccent(e.target.value)}
+            className="h-8 w-10 cursor-pointer rounded border border-border-subtle bg-surface-raised"
+          />
+          <input
+            value={hexDraft}
+            onChange={(e) => setHexDraft(e.target.value)}
+            onBlur={commitHex}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitHex();
+              }
+            }}
+            placeholder={effective}
+            spellCheck={false}
+            aria-label="Accent hex code"
+            className="w-28 rounded border border-border-subtle bg-surface-base px-2 py-1 font-mono text-sm outline-none focus:border-accent"
+          />
+          <button
+            type="button"
+            onClick={() => void setAccent(null)}
+            disabled={accent === null}
+            className="ml-auto rounded px-2 py-1 text-xs text-text-secondary transition-colors duration-[120ms] ease-standard hover:text-text-primary disabled:opacity-40"
+          >
+            Default
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-text-secondary">
+          {accent ? `Using ${accent} in both day and night.` : `Using the ${resolved} default.`}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const { ideaId, navigate } = useHashRoute();
   const ready = useStore((s) => s.ready);
@@ -547,6 +722,9 @@ function App() {
   const paletteOpen = useStore((s) => s.paletteOpen);
   const setPalette = useStore((s) => s.setPalette);
   const createIdea = useStore((s) => s.createIdea);
+  const theme = useStore((s) => s.theme);
+  const accent = useStore((s) => s.accent);
+  const themeOpen = useStore((s) => s.themeOpen);
 
   const selected = useMemo(() => ideas.find((i) => i.id === ideaId) ?? null, [ideas, ideaId]);
 
@@ -566,6 +744,27 @@ function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [setPalette]);
+
+  // Paint the theme onto <html>. `system` follows the OS live.
+  useEffect(() => {
+    const root = document.documentElement;
+    const apply = () => {
+      root.dataset.theme = resolveTheme(theme);
+    };
+    apply();
+    if (theme !== "system") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
+
+  // One inline custom property drives every accent-coloured pixel. A null
+  // accent removes it, letting the theme's own accent through (plan §28).
+  useEffect(() => {
+    const root = document.documentElement;
+    if (accent) root.style.setProperty("--color-accent", accent);
+    else root.style.removeProperty("--color-accent");
+  }, [accent]);
 
   if (!ready) return <Splash />;
   if (error) return <BootError error={error} />;
@@ -587,6 +786,7 @@ function App() {
       {paletteOpen && (
         <CommandPalette onClose={() => setPalette(false)} onNavigate={navigate} />
       )}
+      {themeOpen && <ThemePanel />}
     </div>
   );
 }
