@@ -18,9 +18,10 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { Placeholder } from "@tiptap/extension-placeholder";
-import { isAtEndOfNode, type JSONContent } from "@tiptap/core";
+import { isAtEndOfNode, type Editor, type JSONContent } from "@tiptap/core";
 import { generateKeyBetween } from "fractional-indexing";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -282,6 +283,8 @@ interface State {
   blocksLoaded: boolean;
   /** Set after creating a block so the new editor can claim the caret. */
   focusBlockId: string | null;
+  /** The block whose editor last held focus — where palette formats land. */
+  activeBlockId: string | null;
   setPalette(open: boolean): void;
   setThemeOpen(open: boolean): void;
   setTheme(mode: ThemeMode): Promise<void>;
@@ -292,6 +295,7 @@ interface State {
   cancelDelete(): void;
   confirmDelete(): Promise<void>;
   clearFocusBlock(): void;
+  setActiveBlock(id: string | null): void;
   loadBlocks(ideaId: string): Promise<void>;
   createTextBlock(ideaId: string, afterId?: string | null): Promise<string>;
   saveBlockDoc(id: string, doc: JSONContent): Promise<void>;
@@ -318,6 +322,7 @@ export const useStore = create<State>((set, get) => ({
   blocksFor: null,
   blocksLoaded: false,
   focusBlockId: null,
+  activeBlockId: null,
 
   setPalette: (open) => set({ paletteOpen: open }),
   setThemeOpen: (open) => set({ themeOpen: open }),
@@ -347,6 +352,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   clearFocusBlock: () => set({ focusBlockId: null }),
+  setActiveBlock: (id) => set({ activeBlockId: id }),
 
   async loadBlocks(ideaId) {
     // Claim the request immediately so a slow response for a previous idea
@@ -691,6 +697,13 @@ function Sidebar({
 }
 
 /**
+ * Live editors by block id. Each block owns its editor (plan §9), so "the block
+ * I'm typing in" can only be answered by looking one up — the palette needs this
+ * to apply a format to whatever the user was last editing.
+ */
+const blockEditors = new Map<string, Editor>();
+
+/**
  * Extensions shared by every block. Hoisted so the instances keep their
  * identity across renders — `useEditor` diffs options by reference, and
  * rebuilding `Placeholder.configure(...)` each render is pure waste.
@@ -721,6 +734,7 @@ function TextBlock({ block }: { block: BlockRow }) {
   const saveBlockDoc = useStore((s) => s.saveBlockDoc);
   const focusBlockId = useStore((s) => s.focusBlockId);
   const clearFocusBlock = useStore((s) => s.clearFocusBlock);
+  const setActiveBlock = useStore((s) => s.setActiveBlock);
   const saveTimer = useRef<number | null>(null);
   // The most recent document, kept in a ref so the unmount flush never has to
   // reach for an editor that React may already have destroyed.
@@ -757,7 +771,18 @@ function TextBlock({ block }: { block: BlockRow }) {
         if (latestDoc.current) void saveBlockDoc(block.id, latestDoc.current);
       }, 500);
     },
+    // Remember where the caret was, so a palette format has a target even after
+    // focus has moved to the palette input.
+    onFocus: () => setActiveBlock(block.id),
   });
+
+  // Publish this editor so the palette can reach it (see `blockEditors`).
+  useEffect(() => {
+    blockEditors.set(block.id, editor);
+    return () => {
+      blockEditors.delete(block.id);
+    };
+  }, [block.id, editor]);
 
   // A freshly created block claims the caret once its editor exists.
   useEffect(() => {
@@ -972,15 +997,160 @@ interface Command {
   id: string;
   label: string;
   hint: string;
+  /** Rendered as a heading above the first row of each run (see `rows`). */
+  group?: string;
+  /** Extra search terms, so the palette matches names *and* syntax. */
+  keywords?: string[];
   run: () => void;
+}
+
+/**
+ * The markdown formats the palette can apply to the current block. This is
+ * deliberately the same set plan §9 turns into inline shortcuts, exposed as a
+ * list so nobody has to remember `**` to get bold. `hint` shows the syntax, so
+ * the palette doubles as a shortcut cheat-sheet.
+ *
+ * Links are not here: they need a URL step, so the palette handles them itself.
+ */
+interface MarkdownCommand {
+  id: string;
+  label: string;
+  hint: string;
+  keywords: string[];
+  apply: (editor: Editor) => void;
+}
+
+const MARKDOWN_COMMANDS: MarkdownCommand[] = [
+  {
+    id: "md-p",
+    label: "Paragraph",
+    hint: "plain text",
+    keywords: ["paragraph", "body", "plain", "text", "p"],
+    apply: (e) => e.chain().focus().setParagraph().run(),
+  },
+  {
+    id: "md-h1",
+    label: "Heading 1",
+    hint: "#",
+    keywords: ["h1", "heading", "title", "#"],
+    apply: (e) => e.chain().focus().toggleHeading({ level: 1 }).run(),
+  },
+  {
+    id: "md-h2",
+    label: "Heading 2",
+    hint: "##",
+    keywords: ["h2", "heading", "subtitle", "###"],
+    apply: (e) => e.chain().focus().toggleHeading({ level: 2 }).run(),
+  },
+  {
+    id: "md-h3",
+    label: "Heading 3",
+    hint: "###",
+    keywords: ["h3", "heading", "###"],
+    apply: (e) => e.chain().focus().toggleHeading({ level: 3 }).run(),
+  },
+  {
+    id: "md-bold",
+    label: "Bold",
+    hint: "**bold**",
+    keywords: ["bold", "strong", "**"],
+    apply: (e) => e.chain().focus().toggleBold().run(),
+  },
+  {
+    id: "md-italic",
+    label: "Italic",
+    hint: "*italic*",
+    keywords: ["italic", "emphasis", "em", "*"],
+    apply: (e) => e.chain().focus().toggleItalic().run(),
+  },
+  {
+    id: "md-strike",
+    label: "Strikethrough",
+    hint: "~~strike~~",
+    keywords: ["strike", "strikethrough", "~~"],
+    apply: (e) => e.chain().focus().toggleStrike().run(),
+  },
+  {
+    id: "md-code",
+    label: "Inline code",
+    hint: "`code`",
+    keywords: ["code", "inline", "mono", "`"],
+    apply: (e) => e.chain().focus().toggleCode().run(),
+  },
+  {
+    id: "md-pre",
+    label: "Code block",
+    hint: "```",
+    keywords: ["codeblock", "code block", "pre", "fence", "```"],
+    apply: (e) => e.chain().focus().toggleCodeBlock().run(),
+  },
+  {
+    id: "md-ul",
+    label: "Bullet list",
+    hint: "-",
+    keywords: ["bullet", "unordered", "list", "ul", "-"],
+    apply: (e) => e.chain().focus().toggleBulletList().run(),
+  },
+  {
+    id: "md-ol",
+    label: "Numbered list",
+    hint: "1.",
+    keywords: ["number", "numbered", "ordered", "list", "ol", "1."],
+    apply: (e) => e.chain().focus().toggleOrderedList().run(),
+  },
+  {
+    id: "md-quote",
+    label: "Quote",
+    hint: ">",
+    keywords: ["quote", "blockquote", ">"],
+    apply: (e) => e.chain().focus().toggleBlockquote().run(),
+  },
+  {
+    id: "md-hr",
+    label: "Divider",
+    hint: "---",
+    keywords: ["divider", "rule", "horizontal", "hr", "---"],
+    apply: (e) => e.chain().focus().setHorizontalRule().run(),
+  },
+  {
+    id: "md-clear",
+    label: "Clear formatting",
+    hint: "unset",
+    keywords: ["clear", "remove", "unset", "plain", "reset"],
+    apply: (e) => e.chain().focus().unsetAllMarks().clearNodes().run(),
+  },
+];
+
+/** `example.com` → `https://example.com`, while leaving schemes and anchors be. */
+function normalizeHref(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return "";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith("#")) return trimmed;
+  return `https://${trimmed}`;
 }
 
 function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNavigate: (h: string) => void }) {
   const ideas = useStore((s) => s.ideas);
+  const blocks = useStore((s) => s.blocks);
+  const activeBlockId = useStore((s) => s.activeBlockId);
   const createIdea = useStore((s) => s.createIdea);
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
+  // Non-null while collecting the URL for the Link command.
+  const [linkEditor, setLinkEditor] = useState<Editor | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // The block the user was last typing in, falling back to the first live block
+  // so the text commands still work once focus has wandered.
+  const target = useMemo<Editor | null>(() => {
+    const active = activeBlockId ? blockEditors.get(activeBlockId) : undefined;
+    if (active) return active;
+    for (const block of blocks) {
+      const editor = blockEditors.get(block.id);
+      if (editor) return editor;
+    }
+    return null;
+  }, [activeBlockId, blocks]);
 
   const commands = useMemo<Command[]>(() => {
     const all: Command[] = [
@@ -993,24 +1163,108 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
           onClose();
         },
       },
-      ...ideas.map((idea) => ({
+    ];
+
+    // Only offered when there is a block to format — otherwise they would be
+    // commands that cannot do anything.
+    if (target) {
+      for (const md of MARKDOWN_COMMANDS) {
+        all.push({
+          id: md.id,
+          label: md.label,
+          hint: md.hint,
+          group: "Text",
+          keywords: md.keywords,
+          run: () => {
+            md.apply(target);
+            onClose();
+          },
+        });
+      }
+      all.push({
+        id: "md-link",
+        label: "Link",
+        hint: "[text](url)",
+        group: "Text",
+        keywords: ["link", "url", "href", "["],
+        run: () => {
+          setQuery("");
+          setLinkEditor(target);
+        },
+      });
+    }
+
+    for (const idea of ideas) {
+      all.push({
         id: idea.id,
         label: idea.title,
         hint: "open",
+        group: "Ideas",
         run: () => {
           onNavigate(`#/idea/${idea.id}`);
           onClose();
         },
-      })),
-    ];
-    const needle = query.trim().toLowerCase();
-    return needle ? all.filter((c) => c.label.toLowerCase().includes(needle)) : all;
-  }, [ideas, query, createIdea, onNavigate, onClose]);
+      });
+    }
 
-  useEffect(() => inputRef.current?.focus(), []);
+    const needle = query.trim().toLowerCase();
+    if (!needle) return all;
+    // Match names *and* keywords, so `h1`, `bold`, `**` and `list` all land.
+    return all.filter(
+      (c) =>
+        c.label.toLowerCase().includes(needle) ||
+        (c.keywords ?? []).some((k) => k.toLowerCase().includes(needle)),
+    );
+  }, [ideas, target, query, createIdea, onNavigate, onClose]);
+
+  // Headings are derived rather than stored: one renders only where the group
+  // actually changes, so filtering can never leave a heading with nothing under
+  // it. Rows stay 1:1 with `commands`, which keeps `index` meaningful.
+  const rows = useMemo(() => {
+    let current: string | undefined;
+    return commands.map((command) => {
+      const heading = command.group !== current ? command.group : undefined;
+      current = command.group;
+      return { command, heading };
+    });
+  }, [commands]);
+
+  useEffect(() => {
+    if (linkEditor) return; // don't steal focus back during the URL step
+    inputRef.current?.focus();
+  }, [linkEditor]);
   useEffect(() => setIndex(0), [query]);
 
+  const applyLink = () => {
+    const href = normalizeHref(query);
+    if (linkEditor && href) {
+      if (linkEditor.state.selection.empty) {
+        // Nothing selected, so a plain `setLink` would be an invisible stored
+        // mark: insert the URL as its own link instead.
+        linkEditor
+          .chain()
+          .focus()
+          .insertContent({ type: "text", text: href, marks: [{ type: "link", attrs: { href } }] })
+          .run();
+      } else {
+        linkEditor.chain().focus().extendMarkRange("link").setLink({ href }).run();
+      }
+    }
+    onClose();
+  };
+
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (linkEditor) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyLink();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setLinkEditor(null);
+        setQuery("");
+      }
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setIndex((i) => Math.min(i + 1, commands.length - 1));
@@ -1042,37 +1296,50 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Search ideas, or run a command…"
+          placeholder={linkEditor ? "Link URL, then Enter…" : "Search ideas, or insert markdown…"}
           spellCheck={false}
           className="w-full border-b border-border-subtle bg-transparent px-4 py-3 text-base outline-none placeholder:text-text-secondary focus:border-accent"
         />
         <ul className="max-h-80 overflow-y-auto py-1">
-          {commands.length === 0 ? (
+          {linkEditor ? (
+            <li className="px-4 py-3 text-sm text-text-secondary">
+              {linkEditor.state.selection.empty
+                ? "Links the URL at the cursor. Esc goes back."
+                : "Links the selected text. Esc goes back."}
+            </li>
+          ) : rows.length === 0 ? (
             <li className="px-4 py-3 text-sm text-text-secondary">Nothing matches.</li>
           ) : (
-            commands.map((c, i) => (
-              <li key={c.id}>
-                <button
-                  type="button"
-                  onMouseEnter={() => setIndex(i)}
-                  onClick={c.run}
-                  className={[
-                    "relative flex w-full items-center gap-3 py-2 pr-4 pl-5 text-left text-sm",
-                    i === index ? "bg-surface-sunken text-text-primary" : "text-text-secondary",
-                  ].join(" ")}
-                >
-                  {i === index && (
-                    <span
-                      aria-hidden
-                      className="absolute top-1.5 bottom-1.5 left-2 w-0.5 rounded-full bg-accent"
-                    />
-                  )}
-                  <span className="truncate">{c.label}</span>
-                  <span className={["ml-auto text-xs", i === index ? "text-accent" : ""].join(" ")}>
-                    {c.hint}
-                  </span>
-                </button>
-              </li>
+            rows.map(({ command, heading }, i) => (
+              <Fragment key={command.id}>
+                {heading && (
+                  <li className="px-4 pt-3 pb-1 text-xs tracking-wide text-text-secondary uppercase">
+                    {heading}
+                  </li>
+                )}
+                <li>
+                  <button
+                    type="button"
+                    onMouseEnter={() => setIndex(i)}
+                    onClick={command.run}
+                    className={[
+                      "relative flex w-full items-center gap-3 py-2 pr-4 pl-5 text-left text-sm",
+                      i === index ? "bg-surface-sunken text-text-primary" : "text-text-secondary",
+                    ].join(" ")}
+                  >
+                    {i === index && (
+                      <span
+                        aria-hidden
+                        className="absolute top-1.5 bottom-1.5 left-2 w-0.5 rounded-full bg-accent"
+                      />
+                    )}
+                    <span className="truncate">{command.label}</span>
+                    <span className={["ml-auto text-xs", i === index ? "text-accent" : ""].join(" ")}>
+                      {command.hint}
+                    </span>
+                  </button>
+                </li>
+              </Fragment>
             ))
           )}
         </ul>
