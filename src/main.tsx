@@ -1266,6 +1266,206 @@ function exportLines(summary: ExportSummary): string[] {
   return [...lines, ...summary.notes];
 }
 
+/* ─────────────────────── Slash menu (plan §9:612) ───────────────────────── */
+
+/**
+ * What `/` offers at the start of a line. Plan §9:619's contents list names the
+ * whole set — Sketch, Image, Voice note, File, Callout, Embed idea, Todo, Table
+ * — but §22 is that nothing fails silently, and a menu entry with nothing behind
+ * it is a broken button wearing a friendly label. So this array holds only what
+ * the editor can actually do today; the remaining entries join it on the week
+ * they land (§6 images, §7 audio and files, §14/§21 todo and table).
+ *
+ * Every entry is a markdown-level transform of the block you are standing in —
+ * `/h1` is `toggleHeading`, `/divider` is `setHorizontalRule`. The `#`, `-`, `>`
+ * typing shortcuts (plan §9:611) stay the fast path; this is the discoverable
+ * one.
+ */
+interface SlashCommand {
+  label: string;
+  /**
+   * A short text glyph rather than an emoji. The app ships no icon set, and
+   * U+2630 taught us that even "obvious" glyphs vanish in some UI fonts.
+   */
+  icon: string;
+  keywords: string[];
+  /** Erases the `/query` text, then applies itself. */
+  run: (editor: Editor, range: { from: number; to: number }) => void;
+}
+
+const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    label: "Text",
+    icon: "¶",
+    keywords: ["text", "paragraph", "body", "plain"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).setParagraph().run();
+    },
+  },
+  {
+    label: "Heading 1",
+    icon: "H1",
+    keywords: ["heading", "h1", "title"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).setHeading({ level: 1 }).run();
+    },
+  },
+  {
+    label: "Heading 2",
+    icon: "H2",
+    keywords: ["heading", "h2", "subtitle"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).setHeading({ level: 2 }).run();
+    },
+  },
+  {
+    label: "Heading 3",
+    icon: "H3",
+    keywords: ["heading", "h3"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).setHeading({ level: 3 }).run();
+    },
+  },
+  {
+    label: "Bullet list",
+    icon: "•",
+    keywords: ["bullet", "list", "unordered", "ul"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).toggleBulletList().run();
+    },
+  },
+  {
+    label: "Numbered list",
+    icon: "1.",
+    keywords: ["numbered", "ordered", "list", "ol"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).toggleOrderedList().run();
+    },
+  },
+  {
+    label: "Quote",
+    icon: '"',
+    keywords: ["quote", "blockquote", "citation"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).toggleBlockquote().run();
+    },
+  },
+  {
+    label: "Divider",
+    icon: "—",
+    keywords: ["divider", "rule", "hr", "separator", "line"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).setHorizontalRule().run();
+    },
+  },
+  {
+    label: "Code block",
+    icon: "</>",
+    keywords: ["code", "block", "pre", "fence", "snippet"],
+    run: (editor, range) => {
+      editor.chain().focus().deleteRange(range).toggleCodeBlock().run();
+    },
+  },
+];
+
+/** Label match, or a keyword that starts the query — the same rule the palette uses. */
+function filterSlash(query: string): SlashCommand[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return SLASH_COMMANDS;
+  return SLASH_COMMANDS.filter(
+    (c) => c.label.toLowerCase().includes(q) || c.keywords.some((k) => k.startsWith(q)),
+  );
+}
+
+/**
+ * The `/query` sitting under the caret, or null.
+ *
+ * Only a paragraph or a heading opens one. `/` inside a code block is content,
+ * exactly as Enter is above, and a list item's text lives in its own paragraph,
+ * so bullets and numbers are covered by the first case.
+ */
+function slashQueryAt(state: Editor["state"]): { query: string; from: number; to: number } | null {
+  const { selection } = state;
+  if (!selection.empty) return null;
+  const { $from } = selection;
+  const kind = $from.parent.type.name;
+  if (kind !== "paragraph" && kind !== "heading") return null;
+  // `\ufffc` stands in for an inline leaf, so a future image node can never be
+  // read as text and mistaken for part of the query.
+  const before = $from.parent.textBetween(0, $from.parentOffset, undefined, "\ufffc");
+  const match = /(?:^|\s)\/([^\s/]*)$/.exec(before);
+  if (!match) return null;
+  return { query: match[1], from: $from.pos - match[1].length - 1, to: $from.pos };
+}
+
+/** Everything the block needs to draw and drive the menu. */
+interface SlashState {
+  /** Positions of the `/` and of the caret, so committing removes just the query. */
+  from: number;
+  to: number;
+  query: string;
+  /** Viewport anchor — the popup is `fixed`, like the context menu. */
+  x: number;
+  y: number;
+  index: number;
+}
+
+/**
+ * The `/` popup. Deliberately not the shared context menu: that one is
+ * labels-only plain data, and this one needs a filter, a highlighted row and a
+ * `mousedown` that refuses to steal focus.
+ */
+function SlashMenu({
+  items,
+  index,
+  x,
+  y,
+  onPick,
+  onHover,
+}: {
+  items: SlashCommand[];
+  index: number;
+  x: number;
+  y: number;
+  onPick: (item: SlashCommand) => void;
+  onHover: (index: number) => void;
+}) {
+  return (
+    <div
+      role="listbox"
+      aria-label="Insert"
+      style={{ left: x, top: y }}
+      // Without this the click would blur the editor before it landed, taking
+      // the menu and the caret with it.
+      onMouseDown={(e) => e.preventDefault()}
+      className="fixed z-[60] w-64 overflow-hidden rounded border border-border-subtle bg-surface-raised py-1 shadow-[0_8px_24px_rgb(0_0_0/0.18)]"
+    >
+      {items.length === 0 ? (
+        <p className="px-3 py-1.5 text-sm text-text-secondary">No match</p>
+      ) : (
+        items.map((item, i) => (
+          <button
+            key={item.label}
+            type="button"
+            role="option"
+            aria-selected={i === index}
+            onMouseEnter={() => onHover(i)}
+            onClick={() => onPick(item)}
+            className={[
+              "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm",
+              "transition-colors duration-[120ms] ease-standard",
+              i === index ? "bg-surface-sunken text-text-primary" : "text-text-secondary",
+            ].join(" ")}
+          >
+            <span className="w-5 shrink-0 text-center font-mono text-xs">{item.icon}</span>
+            <span className="truncate">{item.label}</span>
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
 /**
  * One `text` block. Per plan §9 each block owns its own TipTap instance, which
  * is the seam that later lets sketches and audio be atoms in a normal document
@@ -1289,6 +1489,26 @@ function TextBlock({ block }: { block: BlockRow }) {
   // The most recent document, kept in a ref so the unmount flush never has to
   // reach for an editor that React may already have destroyed.
   const latestDoc = useRef<JSONContent | null>(null);
+  // The slash menu's state, mirrored into a ref: `handleKeyDown` runs inside
+  // ProseMirror's event loop and cannot wait for a render to see what is open.
+  const slashRef = useRef<SlashState | null>(null);
+  const [slash, setSlash] = useState<SlashState | null>(null);
+  const setSlashState = (next: SlashState | null) => {
+    slashRef.current = next;
+    setSlash(next);
+  };
+  // `handleKeyDown` needs an Editor, but the options object below is built
+  // before `useEditor` can hand one back, so the handler reads this at event
+  // time rather than capturing a value that does not exist yet.
+  const editorRef = useRef<Editor | null>(null);
+
+  // Defined before `useEditor` because the key handler below calls it; it reads
+  // the live editor out of the ref rather than closing over one.
+  const commitSlash = (item: SlashCommand, open: SlashState) => {
+    const target = editorRef.current;
+    setSlashState(null);
+    if (target) item.run(target, { from: open.from, to: open.to });
+  };
 
   const editor = useEditor({
     extensions: BLOCK_EXTENSIONS,
@@ -1298,6 +1518,29 @@ function TextBlock({ block }: { block: BlockRow }) {
       // Runs before ProseMirror's own keymap (props are resolved before
       // plugins), so returning true pre-empts the default Enter.
       handleKeyDown: (view, event) => {
+        // While the slash menu is open it owns the arrows and the two commit
+        // keys, so typing a filter never moves the caret.
+        const open = slashRef.current;
+        if (open) {
+          const items = filterSlash(open.query);
+          if (event.key === "Escape") {
+            setSlashState(null);
+            return true;
+          }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            if (items.length) {
+              const step = event.key === "ArrowDown" ? 1 : -1;
+              setSlashState({ ...open, index: (open.index + step + items.length) % items.length });
+            }
+            return true;
+          }
+          if (event.key === "Enter" || event.key === "Tab") {
+            const item = items[open.index];
+            if (item) commitSlash(item, open);
+            return true;
+          }
+        }
+
         if (event.key !== "Enter") return false;
         if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
         const { state } = view;
@@ -1315,16 +1558,33 @@ function TextBlock({ block }: { block: BlockRow }) {
     },
     onUpdate: ({ editor }) => {
       latestDoc.current = editor.getJSON();
+
+      // A `/` typed at a line start (or after a space) opens the menu and keeps
+      // it beside the caret; anything that breaks the pattern — a space, or
+      // deleting the slash — closes it again.
+      const at = slashQueryAt(editor.state);
+      if (at) {
+        const anchor = editor.view.coordsAtPos(at.to);
+        setSlashState({ ...at, x: anchor.left, y: anchor.bottom + 4, index: 0 });
+      } else if (slashRef.current) {
+        setSlashState(null);
+      }
+
       if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
         saveTimer.current = null;
         if (latestDoc.current) void saveBlockDoc(block.id, latestDoc.current);
       }, 500);
     },
+    // Clicking away abandons the menu; the popup itself prevents that blur so a
+    // click on one of its rows still lands.
+    onBlur: () => setSlashState(null),
     // Remember where the caret was, so a palette format has a target even after
     // focus has moved to the palette input.
     onFocus: () => setActiveBlock(block.id),
   });
+
+  editorRef.current = editor;
 
   // Publish this editor so the palette can reach it (see `blockEditors`).
   useEffect(() => {
@@ -1340,6 +1600,22 @@ function TextBlock({ block }: { block: BlockRow }) {
     editor.commands.focus("start");
     clearFocusBlock();
   }, [editor, focusBlockId, block.id, clearFocusBlock]);
+
+  // The popup is anchored to *viewport* coordinates, so a scroll would leave it
+  // floating over unrelated text. Re-anchor it to the caret instead — the doc
+  // position is unchanged by scrolling, only the view of it moves.
+  useEffect(() => {
+    if (!slash) return;
+    const reanchor = () => {
+      const current = slashRef.current;
+      const target = editorRef.current;
+      if (!current || !target) return;
+      const anchor = target.view.coordsAtPos(current.to);
+      setSlashState({ ...current, x: anchor.left, y: anchor.bottom + 4 });
+    };
+    window.addEventListener("scroll", reanchor, true);
+    return () => window.removeEventListener("scroll", reanchor, true);
+  }, [slash]);
 
   // Flush a pending save if the block unmounts (idea switch, delete) so the
   // last keystrokes aren't lost to the debounce.
@@ -1407,6 +1683,18 @@ function TextBlock({ block }: { block: BlockRow }) {
         ⋮
       </button>
       <EditorContent editor={editor} />
+      {slash ? (
+        <SlashMenu
+          items={filterSlash(slash.query)}
+          index={slash.index}
+          x={slash.x}
+          y={slash.y}
+          onPick={(item) => commitSlash(item, slash)}
+          onHover={(index) => {
+            if (slashRef.current) setSlashState({ ...slashRef.current, index });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

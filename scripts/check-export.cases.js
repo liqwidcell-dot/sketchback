@@ -267,6 +267,64 @@ async function runTests() {
     eq("e2e: a link cycle terminates", [...platform.written.keys()].sort(), ["/out/A/A.md", "/out/A/B.md"]);
     eq("e2e: both cycle links rewritten", cycle.linksRewritten, 2);
   }
+
+  /* 7. Slash menu (plan §9:612) ------------------------------------------ */
+
+  /**
+   * A fake editor state carrying only what `slashQueryAt` reads. `pos` is any
+   * doc position; the result is expressed relative to it.
+   */
+  const slashStateOf = (before, kind = "paragraph", empty = true) => ({
+    selection: {
+      empty,
+      $from: {
+        parent: { type: { name: kind }, textBetween: () => before },
+        parentOffset: before.length,
+        pos: 100,
+      },
+    },
+  });
+
+  eq("slash: a bare slash opens empty", slashQueryAt(slashStateOf("/")), { query: "", from: 99, to: 100 });
+  eq("slash: the query follows the slash", slashQueryAt(slashStateOf("/h1")), {
+    query: "h1",
+    from: 97,
+    to: 100,
+  });
+  eq("slash: opens mid-line after a space", slashQueryAt(slashStateOf("see /qu")), {
+    query: "qu",
+    from: 97,
+    to: 100,
+  });
+  eq("slash: a slash inside a word is not one", slashQueryAt(slashStateOf("a/b")), null);
+  eq("slash: a URL is not one", slashQueryAt(slashStateOf("go http://exa")), null);
+  eq("slash: a second slash ends the query", slashQueryAt(slashStateOf("/a/b")), null);
+  eq("slash: a space ends the query", slashQueryAt(slashStateOf("/h1 ")), null);
+  eq("slash: a heading can open one", slashQueryAt(slashStateOf("/h2", "heading")), {
+    query: "h2",
+    from: 97,
+    to: 100,
+  });
+  eq("slash: a code block cannot", slashQueryAt(slashStateOf("/img", "codeBlock")), null);
+  eq("slash: a live selection is not one", slashQueryAt(slashStateOf("/h1", "paragraph", false)), null);
+
+  eq("slash menu: an empty query lists everything", filterSlash("").length, SLASH_COMMANDS.length);
+  eq("slash menu: h1 finds one", filterSlash("h1").map((c) => c.label), ["Heading 1"]);
+  eq("slash menu: head finds all three", filterSlash("head").length, 3);
+  eq("slash menu: list finds both lists", filterSlash("list").length, 2);
+  eq("slash menu: a keyword works too", filterSlash("hr").map((c) => c.label), ["Divider"]);
+  eq("slash menu: nothing matches nothing", filterSlash("zzz"), []);
+  eq(
+    "slash menu: labels are unique",
+    new Set(SLASH_COMMANDS.map((c) => c.label)).size,
+    SLASH_COMMANDS.length,
+  );
+  check(
+    "slash menu: every entry is runnable and searchable",
+    SLASH_COMMANDS.every(
+      (c) => c.label && c.icon && c.keywords.length > 0 && typeof c.run === "function",
+    ),
+  );
 }
 
 runTests().then(() => {
