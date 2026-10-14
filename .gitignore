@@ -5,3 +5,9 @@ src-tauri/gen/
 .tmp-export-check/
 *.local
 .DS_Store
+
+# The session journal stays on disk but is not published. Plan §6 lists it as
+# part of the layout and plan §22 relies on it as the friction log, so it still
+# lives at the repo root — it is simply never committed, and it was purged from
+# history on 2026-10-14.
+JOURNAL.md
