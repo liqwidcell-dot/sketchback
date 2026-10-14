@@ -680,6 +680,23 @@ function BootError({ error }: { error: string }) {
   );
 }
 
+/**
+ * The hamburger glyph, drawn rather than typed.
+ *
+ * `☰` (U+2630) is absent from enough UI fonts to be a coin flip, and the app has
+ * no icon set, so three bars it is. `bg-current` makes it inherit whatever colour
+ * the button is in, so hover and active states need no extra plumbing.
+ */
+function HamburgerIcon() {
+  return (
+    <span aria-hidden className="flex w-3.5 flex-col gap-[3px]">
+      <span className="h-px w-full rounded-full bg-current" />
+      <span className="h-px w-full rounded-full bg-current" />
+      <span className="h-px w-full rounded-full bg-current" />
+    </span>
+  );
+}
+
 function Sidebar({
   activeId,
   onOpen,
@@ -693,6 +710,7 @@ function Sidebar({
   const vaultRoot = useStore((s) => s.vaultRoot);
   const version = useStore((s) => s.version);
   const setThemeOpen = useStore((s) => s.setThemeOpen);
+  const themeOpen = useStore((s) => s.themeOpen);
   const openMenu = useStore((s) => s.openMenu);
   const renameIdea = useStore((s) => s.renameIdea);
   const askDelete = useStore((s) => s.askDelete);
@@ -806,15 +824,20 @@ function Sidebar({
         )}
       </nav>
 
-      <footer className="border-t border-border-subtle px-3 py-2 text-xs text-text-secondary">
+      <footer className="relative border-t border-border-subtle px-3 py-2 text-xs text-text-secondary">
         <button
           type="button"
-          onClick={() => setThemeOpen(true)}
+          data-theme-trigger
+          aria-haspopup="dialog"
+          aria-expanded={themeOpen}
+          title="Theme"
+          onClick={() => setThemeOpen(!themeOpen)}
           className="mb-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left transition-colors duration-[120ms] ease-standard hover:bg-accent/10 hover:text-accent"
         >
-          <span aria-hidden className="text-accent">◐</span>
+          <HamburgerIcon />
           <span>Theme</span>
         </button>
+        {themeOpen && <ThemeMenu onClose={() => setThemeOpen(false)} />}
         <div className="truncate" title={vaultRoot}>
           {vaultRoot || "—"}
         </div>
@@ -1465,17 +1488,22 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
         <span>edited {new Date(idea.updated_at).toLocaleString()}</span>
         <button
           type="button"
-          onClick={() => void exportIdea(idea.id)}
-          className="ml-auto transition-colors duration-[120ms] ease-standard hover:text-accent"
+          data-menu-trigger
+          aria-haspopup="menu"
+          aria-label="Idea actions"
+          title="Idea actions"
+          onClick={(e) =>
+            toggleMenuAt(e.currentTarget, [
+              {
+                label: "Export as Markdown folder…",
+                onSelect: () => void exportIdea(idea.id),
+              },
+              { label: "Delete idea", danger: true, onSelect: () => askDelete(idea) },
+            ])
+          }
+          className="ml-auto flex items-center rounded px-1.5 py-1 transition-colors duration-[120ms] ease-standard hover:bg-accent/10 hover:text-accent"
         >
-          Export as Markdown
-        </button>
-        <button
-          type="button"
-          onClick={() => askDelete(idea)}
-          className="transition-colors duration-[120ms] ease-standard hover:text-danger"
-        >
-          Delete
+          <HamburgerIcon />
         </button>
       </div>
 
@@ -1914,23 +1942,51 @@ const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: "system", label: "System" },
 ];
 
-function ThemePanel() {
+/**
+ * Theme controls (plan §27–28) as a dropdown, not a modal.
+ *
+ * The ask was to give the theme its own hamburger menu, so this replaces the
+ * centred panel with a popover anchored above its trigger in the sidebar footer
+ * — which also means no viewport maths: `bottom-full` puts it where a footer menu
+ * belongs. It is a popover rather than a `MenuItem[]` because it holds real
+ * controls (a segmented appearance picker and a colour well), and the shared
+ * context menu is deliberately labels-only.
+ */
+function ThemeMenu({ onClose }: { onClose: () => void }) {
   const theme = useStore((s) => s.theme);
   const accent = useStore((s) => s.accent);
   const setTheme = useStore((s) => s.setTheme);
   const setAccent = useStore((s) => s.setAccent);
-  const setThemeOpen = useStore((s) => s.setThemeOpen);
+  const panelRef = useRef<HTMLDivElement>(null);
   const [hexDraft, setHexDraft] = useState(accent ?? "");
 
   useEffect(() => setHexDraft(accent ?? ""), [accent]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setThemeOpen(false);
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (panelRef.current?.contains(target)) return;
+      // Its own trigger toggles this closed; closing here first would re-open it.
+      if (target.closest("[data-theme-trigger]")) return;
+      onClose();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [setThemeOpen]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("mousedown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", onClose);
+    // Deliberately no `blur` handler: picking an accent opens the native colour
+    // chooser in its own window, and on some platforms that blurs this one.
+    return () => {
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", onClose);
+    };
+  }, [onClose]);
 
   const resolved = resolveTheme(theme);
   const effective = accent ?? THEME_ACCENT[resolved];
@@ -1943,76 +1999,86 @@ function ThemePanel() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(0_0_0/0.35)] pt-[12vh]"
-      onClick={() => setThemeOpen(false)}
+      ref={panelRef}
+      role="dialog"
+      aria-label="Theme"
+      className="absolute bottom-full left-2 z-50 mb-1 w-60 rounded border border-border-subtle bg-surface-raised p-3 shadow-[0_8px_24px_rgb(0_0_0/0.18)]"
     >
-      <div
-        role="dialog"
-        aria-label="Theme"
-        className="w-[26rem] max-w-[92vw] rounded border border-border-subtle bg-surface-raised p-5 shadow-[0_4px_12px_rgb(0_0_0/0.08)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="text-base font-semibold">Theme</h2>
-
-        <p className="mt-4 text-xs uppercase tracking-wide text-text-secondary">Appearance</p>
-        <div className="mt-2 grid grid-cols-3 gap-1 rounded border border-border-subtle p-1">
-          {THEME_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => void setTheme(option.value)}
-              aria-pressed={theme === option.value}
-              className={[
-                "rounded px-2 py-1.5 text-sm transition-colors duration-[120ms] ease-standard",
-                theme === option.value
-                  ? "bg-accent text-on-accent"
-                  : "text-text-secondary hover:text-text-primary",
-              ].join(" ")}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-
-        <p className="mt-5 text-xs uppercase tracking-wide text-text-secondary">Accent</p>
-        <div className="mt-2 flex items-center gap-2">
-          <input
-            type="color"
-            aria-label="Accent colour"
-            value={effective}
-            onChange={(e) => void setAccent(e.target.value)}
-            className="h-8 w-10 cursor-pointer rounded border border-border-subtle bg-surface-raised"
-          />
-          <input
-            value={hexDraft}
-            onChange={(e) => setHexDraft(e.target.value)}
-            onBlur={commitHex}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                commitHex();
-              }
-            }}
-            placeholder={effective}
-            spellCheck={false}
-            aria-label="Accent hex code"
-            className="w-28 rounded border border-border-subtle bg-surface-base px-2 py-1 font-mono text-sm outline-none focus:border-accent"
-          />
+      <p className="text-xs uppercase tracking-wide text-text-secondary">Appearance</p>
+      <div className="mt-2 grid grid-cols-3 gap-1 rounded border border-border-subtle p-1">
+        {THEME_OPTIONS.map((option) => (
           <button
+            key={option.value}
             type="button"
-            onClick={() => void setAccent(null)}
-            disabled={accent === null}
-            className="ml-auto rounded px-2 py-1 text-xs text-text-secondary transition-colors duration-[120ms] ease-standard hover:text-text-primary disabled:opacity-40"
+            onClick={() => void setTheme(option.value)}
+            aria-pressed={theme === option.value}
+            className={[
+              "rounded px-1 py-1 text-xs transition-colors duration-[120ms] ease-standard",
+              theme === option.value
+                ? "bg-accent text-on-accent"
+                : "text-text-secondary hover:text-text-primary",
+            ].join(" ")}
           >
-            Default
+            {option.label}
           </button>
-        </div>
-        <p className="mt-2 text-xs text-text-secondary">
-          {accent ? `Using ${accent} in both day and night.` : `Using the ${resolved} default.`}
-        </p>
+        ))}
       </div>
+
+      <p className="mt-3 text-xs uppercase tracking-wide text-text-secondary">Accent</p>
+      <div className="mt-2 flex items-center gap-2">
+        <input
+          type="color"
+          aria-label="Accent colour"
+          value={effective}
+          onChange={(e) => void setAccent(e.target.value)}
+          className="h-7 w-9 cursor-pointer rounded border border-border-subtle bg-surface-raised"
+        />
+        <input
+          value={hexDraft}
+          onChange={(e) => setHexDraft(e.target.value)}
+          onBlur={commitHex}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitHex();
+            }
+          }}
+          placeholder={effective}
+          spellCheck={false}
+          aria-label="Accent hex code"
+          className="w-20 rounded border border-border-subtle bg-surface-base px-2 py-1 font-mono text-xs outline-none focus:border-accent"
+        />
+        <button
+          type="button"
+          onClick={() => void setAccent(null)}
+          disabled={accent === null}
+          className="ml-auto rounded px-1.5 py-1 text-xs text-text-secondary transition-colors duration-[120ms] ease-standard hover:text-text-primary disabled:opacity-40"
+        >
+          Default
+        </button>
+      </div>
+      <p className="mt-2 text-[0.7rem] leading-snug text-text-secondary">
+        {accent ? `Using ${accent} in both day and night.` : `Using the ${resolved} default.`}
+      </p>
     </div>
   );
+}
+
+/**
+ * Open a menu anchored under a button — or close the one that is already open,
+ * so the same button both opens and dismisses, like a real menu button.
+ *
+ * Doing it here (rather than reading `menu` in each caller) keeps the toggle in
+ * one place: a caller only has to say which items it wants.
+ */
+function toggleMenuAt(trigger: HTMLElement, items: MenuItem[]) {
+  const store = useStore.getState();
+  if (store.menu) {
+    store.closeMenu();
+    return;
+  }
+  const rect = trigger.getBoundingClientRect();
+  store.openMenu(rect.left, rect.bottom + 4, items);
 }
 
 function ContextMenu() {
@@ -2041,7 +2107,12 @@ function ContextMenu() {
     const count = menu.items.length;
 
     const onDown = (e: MouseEvent) => {
-      if (!panelRef.current?.contains(e.target as Node)) closeMenu();
+      const target = e.target as HTMLElement;
+      if (panelRef.current?.contains(target)) return;
+      // A menu's own trigger handles the dismissal itself (see `toggleMenuAt`);
+      // closing here first would make the button re-open what it just shut.
+      if (target.closest("[data-menu-trigger]")) return;
+      closeMenu();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -2231,7 +2302,6 @@ function App() {
   const createIdea = useStore((s) => s.createIdea);
   const theme = useStore((s) => s.theme);
   const accent = useStore((s) => s.accent);
-  const themeOpen = useStore((s) => s.themeOpen);
   const pendingDelete = useStore((s) => s.pendingDelete);
   const cancelDelete = useStore((s) => s.cancelDelete);
   const confirmDelete = useStore((s) => s.confirmDelete);
@@ -2301,7 +2371,6 @@ function App() {
           openIdea={selected}
         />
       )}
-      {themeOpen && <ThemePanel />}
       <ContextMenu />
       <NoticePanel />
       {pendingDelete && (

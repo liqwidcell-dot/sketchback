@@ -1470,12 +1470,16 @@ Only if you're ahead of schedule at a week boundary. Ordered by value-per-hour.
 1. **Self-hosted Whisper on the Terra box** transcribing voice notes into inline editable text under the clip. The single highest-impact stretch item — voice notes become searchable.
 2. **Obsidian importer** pulled forward to week 9 (if you want the dogfood benefit earlier)
 3. **Gallery and timeline board layouts** (data model already supports it — view only)
-4. **Lasso select** in sketches (move / duplicate / delete stroke groups)
-5. **Filesystem watch** — drop a file into the vault folder, app notices and imports it
-6. **Tauri mobile** (iPad/Android) sharing the React codebase, sketches only
-7. **Daily notes** — an idea auto-created for today, `#daily` tagged
-8. **Export an idea as a self-contained `.html`** with ink inlined as SVG (pull forward from week 11 if share links get cut)
-9. **Plugin API** — expose the block registry
+4. **Idea tabs** — several ideas open at once in a tab strip above the editor, each tab
+   holding its own scroll position and open blocks. The router is already one route per
+   idea, so this is a strip plus a list of open ids, not a routing rewrite. The sidebar
+   stays the index; tabs are the working set.
+5. **Lasso select** in sketches (move / duplicate / delete stroke groups)
+6. **Filesystem watch** — drop a file into the vault folder, app notices and imports it
+7. **Tauri mobile** (iPad/Android) sharing the React codebase, sketches only
+8. **Daily notes** — an idea auto-created for today, `#daily` tagged
+9. **Export an idea as a self-contained `.html`** with ink inlined as SVG (pull forward from week 11 if share links get cut)
+10. **Plugin API** — expose the block registry
 
 ---
 
