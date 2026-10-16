@@ -206,8 +206,14 @@
       }
       .shots img {
         display: block;
-        width: 100%;
+        /* Screenshots come in mixed shapes (a full window, a crop of the
+           sidebar). Cap both axes so a narrow crop does not stretch its row
+           into a column. */
+        max-width: 100%;
+        max-height: 24rem;
+        width: auto;
         height: auto;
+        margin-inline: auto;
         border: 1px solid var(--border-subtle);
         border-radius: 8px;
         background: var(--surface-sunken);
@@ -323,20 +329,20 @@
       </p>
       <div class="shots">
         <figure data-shot>
-          <img src="screenshots/idea-list.png" alt="The sidebar listing ideas, with one idea open in the editor." />
-          <figcaption>An idea, open — the sidebar is the index.</figcaption>
+          <img src="screenshots/blocks.png" alt="An idea open in the editor: a heading, a bulleted list, a numbered list and an indented quote." />
+          <figcaption>An idea is a stack of blocks — headings, lists, a quote.</figcaption>
         </figure>
         <figure data-shot>
-          <img src="screenshots/text-block.png" alt="Text blocks being edited, showing markdown shortcuts." />
-          <figcaption>Text blocks, with markdown in and out.</figcaption>
+          <img src="screenshots/markdown.png" alt="The note that describes the app, open in the editor, showing headings, bullets and a link." />
+          <figcaption>Blocks are markdown in and out. This is the note that describes the app.</figcaption>
         </figure>
         <figure data-shot>
-          <img src="screenshots/command-palette.png" alt="The command palette open, listing markdown commands." />
-          <figcaption>The command palette, on <code>Ctrl+K</code>.</figcaption>
+          <img src="screenshots/sidebar.png" alt="The sidebar, listing six ideas." />
+          <figcaption>The sidebar is the index: every idea, one line each.</figcaption>
         </figure>
         <figure data-shot>
-          <img src="screenshots/export.png" alt="The export action reporting a written folder of markdown files." />
-          <figcaption>Exporting an idea as a folder of linked <code>.md</code> files.</figcaption>
+          <img src="screenshots/theme.png" alt="The theme menu open: day, night and system buttons, an accent colour picker and a hex field, and the line &quot;Using #540075 in both day and night.&quot;" />
+          <figcaption>Day, night or system, and an accent of your own. It sticks.</figcaption>
         </figure>
       </div>
 
