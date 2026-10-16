@@ -21,7 +21,8 @@ Sketches, photos, voice notes, files, boards, links and sync do not exist yet �
 they are the rest of the plan.
 
 There is a one-page demo at <https://liqwidcell-dot.github.io/sketchback/>
-(source in [`site/`](./site)).
+(source in [`docs/`](./docs) — that folder name is GitHub Pages' requirement for
+serving a branch subfolder).
 
 ## Develop
 
@@ -38,7 +39,7 @@ Other scripts: `npm run build` (frontend bundle), `npm run typecheck`.
 src/main.tsx          the whole frontend: Platform, store, views, palette, router
 src/styles.css        Tailwind 4 entry + the design tokens from plan §27
 src-tauri/src/main.rs the Rust shell: SQLite schema + migrations
-site/index.html       the demo page: one static file, no build step
+docs/index.html       the demo page: one static file, no build step
 ```
 
 Files are intentionally few. Same-type code is kept in one file (the plan's
