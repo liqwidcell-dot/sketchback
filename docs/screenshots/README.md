@@ -15,11 +15,21 @@ short placeholder instead. So it is correct before and after you add them.
 Guidelines:
 
 - **Window only, please.** A full-screen grab would publish the panel, the
-  wallpaper and whatever else was on screen. On Hyprland, grab just the app:
-  `hyprshot -m window -o docs/screenshots` (then rename), or
-  `grim -g "$(hyprctl -j activewindow | jq -r '"\(.at[0]),\(.at[1]) \(.size[0]),\(.size[1])"')" shot.png`.
-- Width around 1400–1600px reads well in the two-column grid; the page scales
-  them down, so larger is fine.
+  wallpaper and whatever else was on screen. Raise the app first, because `grim`
+  captures the screen — an overlapping window is what ends up in the file. This
+  targets the app by class, so it works even when it is not the focused window:
+
+  ```sh
+  hyprctl dispatch focuswindow class:sketchback
+  grim -g "$(hyprctl clients -j \
+    | jq -r '.[] | select(.class=="sketchback") | "\(.at[0]),\(.at[1]) \(.size[0]),\(.size[1])"')" \
+    docs/screenshots/idea-list.png
+  ```
+
+  `slurp` is installed too, if you would rather drag the region by hand:
+  `grim -g "$(slurp)" docs/screenshots/idea-list.png`.
+- Width around 1300px+ reads well in the two-column grid; the page scales images
+  down, so larger is fine.
 - PNG is fine, but if the file gets large, JPEGs at quality ~85 are smaller and
   indistinguishable at this size. Keep any single file under ~500 KB.
 - Light theme is the shipped default, so light screenshots match the page's own
