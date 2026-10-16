@@ -33,12 +33,6 @@ npm run tauri dev      # launches the desktop app with HMR
 
 Other scripts: `npm run build` (frontend bundle), `npm run typecheck`.
 
-`npm run seed` fills the vault with a demo notebook — six ideas of realistic
-notes — so the app (and any screenshot of it) looks like something rather than
-nothing. It writes only rows whose ids begin `seed-`, so it is safe to re-run and
-never touches your own notes; `--fresh` additionally hides non-demo ideas
-(reversibly), and `--check` prints the stored text back out as markdown.
-
 ## Layout
 
 ```text
