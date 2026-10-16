@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sketchback — an idea notebook</title>
+    <meta
+      name="description"
+      content="An idea notebook where the atom isn't a paragraph but a block — and a block can be ink, a photo, a voice memo or a file. Local-first desktop app, in early development."
+    />
+    <meta property="og:title" content="Sketchback — an idea notebook" />
+    <meta
+      property="og:description"
+      content="Obsidian-shaped, but the atom is a block, and a block can be ink, a photo, a voice memo or a file. In early development."
+    />
+    <meta name="theme-color" content="#faf9f7" />
+    <link rel="icon" href="icon.png" />
+    <link rel="apple-touch-icon" href="icon.png" />
+
+    <!-- Tokens copied from src/styles.css (plan §27) so the page is the same
+         material as the app. Repeating them here keeps this page one file with
+         no build step and no dependency. -->
+    <style>
+      :root {
+        --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        --surface-base: #faf9f7;
+        --surface-raised: #ffffff;
+        --surface-sunken: #f0efec;
+        --border-subtle: #e5e2dc;
+        --text-primary: #1c1b19;
+        --text-secondary: #6b6862;
+        --accent: #3b6ea5;
+        --on-accent: #ffffff;
+        --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+        color-scheme: light;
+      }
+      /* Dark is its own palette, not an inversion — same rule as the app. */
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --surface-base: #16161a;
+          --surface-raised: #1e1e23;
+          --surface-sunken: #101014;
+          --border-subtle: #2a2a31;
+          --text-primary: #e8e6e3;
+          --text-secondary: #9a978f;
+          --accent: #7aa8d8;
+          --on-accent: #16161a;
+          color-scheme: dark;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--surface-base);
+        color: var(--text-primary);
+        font-family: var(--font-sans);
+        font-size: 16px;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap {
+        max-width: 46rem;
+        margin: 0 auto;
+        padding: 4rem 1.5rem 5rem;
+      }
+
+      a:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      .mark {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+        margin-bottom: 1.25rem;
+      }
+      .mark img {
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        border: 1px solid var(--border-subtle);
+      }
+      h1 {
+        font-size: 2rem;
+        line-height: 1.2;
+        letter-spacing: -0.01em;
+        margin: 0;
+      }
+      .tagline {
+        font-size: 1.1875rem;
+        color: var(--text-secondary);
+        margin: 0.75rem 0 0;
+        max-width: 34rem;
+      }
+
+      h2 {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin: 3rem 0 0.75rem;
+      }
+      h3 {
+        font-size: 0.9375rem;
+        margin: 0 0 0.4rem;
+      }
+      p {
+        margin: 0 0 1rem;
+      }
+      ul {
+        margin: 0;
+        padding-left: 1.15rem;
+      }
+      li {
+        margin: 0.3rem 0;
+      }
+      strong {
+        font-weight: 600;
+      }
+      code {
+        font-family: var(--font-mono);
+        font-size: 0.875em;
+        background: var(--surface-sunken);
+        padding: 0.1em 0.35em;
+        border-radius: 4px;
+      }
+
+      .wedges {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .wedges li {
+        margin: 0.85rem 0;
+        padding-left: 1rem;
+        border-left: 2px solid var(--border-subtle);
+      }
+      .wedges p {
+        margin: 0.15rem 0 0;
+        color: var(--text-secondary);
+        font-size: 0.9375rem;
+      }
+
+      .status {
+        display: grid;
+        gap: 1.5rem;
+        grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+      }
+      .status ul {
+        color: var(--text-secondary);
+        font-size: 0.9375rem;
+      }
+      .status h3 .tag {
+        font-weight: 400;
+        color: var(--text-secondary);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 1rem;
+        margin: 2.5rem 0 0;
+      }
+      .btn {
+        display: inline-block;
+        background: var(--accent);
+        color: var(--on-accent);
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 0.9375rem;
+        padding: 0.6rem 1.15rem;
+        border-radius: 6px;
+        transition: filter 120ms var(--ease-standard);
+      }
+      .btn:hover {
+        filter: brightness(1.08);
+      }
+      .quiet {
+        color: var(--text-secondary);
+        text-decoration: none;
+        border-bottom: 1px solid var(--border-subtle);
+        font-size: 0.9375rem;
+        transition: color 120ms var(--ease-standard), border-color 120ms var(--ease-standard);
+      }
+      .quiet:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .shots {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+        gap: 1.5rem;
+        margin: 0;
+      }
+      figure {
+        margin: 0;
+      }
+      .shots img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border: 1px solid var(--border-subtle);
+        border-radius: 8px;
+        background: var(--surface-sunken);
+      }
+      figcaption {
+        font-size: 0.8125rem;
+        color: var(--text-secondary);
+        margin-top: 0.55rem;
+      }
+      .note {
+        color: var(--text-secondary);
+        font-size: 0.9375rem;
+      }
+
+      footer {
+        margin-top: 4rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border-subtle);
+        font-size: 0.8125rem;
+        color: var(--text-secondary);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <div class="mark">
+        <img src="icon.png" alt="" width="34" height="34" />
+        <h1>Sketchback</h1>
+      </div>
+      <p class="tagline">
+        An idea notebook where the atom isn't a paragraph — it's a <strong>block</strong>, and a
+        block can be ink, a photo, a voice memo, or a file.
+      </p>
+
+      <p>
+        Obsidian-shaped, but a note is a stack of blocks rather than a markdown file. Project
+        boards are a view over the link graph, not a separate thing. It's a local-first desktop
+        app for one person, written in Tauri and React, with sync to a home server as an option
+        rather than a requirement.
+      </p>
+
+      <h2>The point</h2>
+      <ul class="wedges">
+        <li>
+          <strong>Ink inside a note.</strong>
+          <p>
+            An infinite-canvas sketch layer as just another block — zoom forever, tiny files,
+            feels right with a pen.
+          </p>
+        </li>
+        <li>
+          <strong>Media that doesn't fall over.</strong>
+          <p>
+            Drop 400 phone photos into an idea and the app keeps up. Content-addressed storage,
+            thumbnails, no memory blow-up.
+          </p>
+        </li>
+        <li>
+          <strong>Boards that are your ideas.</strong>
+          <p>
+            A kanban whose cards <em>are</em> the ideas. Drag a card and the idea moves with it.
+          </p>
+        </li>
+      </ul>
+
+      <p>
+        One rule keeps all three cheap: <strong>everything is a blob or a block</strong>. Blocks
+        are addressable, and links are rows. A sketch is a block. A photo is a block plus blobs.
+        Nothing gets a bespoke way of being saved.
+      </p>
+
+      <h2>Where it is right now</h2>
+      <p class="note">
+        This is an early build — week 2 of a 12-week plan. It is being written in the open, and
+        the plan itself is in the repository. Here is the honest split.
+      </p>
+      <div class="status">
+        <div>
+          <h3>Working today</h3>
+          <ul>
+            <li>Ideas: create, rename, delete, reopen — they survive a restart</li>
+            <li>Text blocks: one editor per block, markdown shortcuts going in and markdown coming out</li>
+            <li>A command palette on <code>Ctrl+K</code> with every markdown element</li>
+            <li>A slash menu — type <code>/</code> to insert</li>
+            <li>Day, night and system themes, plus a custom accent colour</li>
+            <li>Export an idea as a folder of linked <code>.md</code> files, ready for Obsidian</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Not built yet <span class="tag">— in plan order</span></h3>
+          <ul>
+            <li>Sketching and the ink canvas</li>
+            <li>Photos, voice memos and file attachments</li>
+            <li>Boards</li>
+            <li>Links, backlinks and search</li>
+            <li>Undo history and sync</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="actions">
+        <a class="btn" href="https://github.com/liqwidcell-dot/sketchback">Source on GitHub</a>
+        <a
+          class="quiet"
+          href="https://github.com/liqwidcell-dot/sketchback/blob/main/plan-final.md"
+          >Read the build plan</a
+        >
+      </div>
+
+      <h2>Screenshots</h2>
+      <p class="note" id="no-shots" hidden>
+        Nothing here yet. Screenshots appear as the surfaces land.
+      </p>
+      <div class="shots">
+        <figure data-shot>
+          <img src="screenshots/idea-list.png" alt="The sidebar listing ideas, with one idea open in the editor." />
+          <figcaption>An idea, open — the sidebar is the index.</figcaption>
+        </figure>
+        <figure data-shot>
+          <img src="screenshots/text-block.png" alt="Text blocks being edited, showing markdown shortcuts." />
+          <figcaption>Text blocks, with markdown in and out.</figcaption>
+        </figure>
+        <figure data-shot>
+          <img src="screenshots/command-palette.png" alt="The command palette open, listing markdown commands." />
+          <figcaption>The command palette, on <code>Ctrl+K</code>.</figcaption>
+        </figure>
+        <figure data-shot>
+          <img src="screenshots/export.png" alt="The export action reporting a written folder of markdown files." />
+          <figcaption>Exporting an idea as a folder of linked <code>.md</code> files.</figcaption>
+        </figure>
+      </div>
+
+      <footer>
+        A solo project, built in the open. Tauri v2, React 19, TypeScript, SQLite. Local-first —
+        your notes are files and rows on your own machine.
+      </footer>
+    </main>
+
+    <script>
+      // The gallery describes itself honestly. A figure whose image is missing
+      // removes itself, and if every one does, the placeholder note stands
+      // alone — so the page is correct before the screenshots exist and after,
+      // with no code change either side of that.
+      function drop(img) {
+        img.closest("figure").remove();
+        if (!document.querySelector("figure[data-shot]")) {
+          document.getElementById("no-shots").hidden = false;
+        }
+      }
+      document.querySelectorAll("figure[data-shot] img").forEach(function (img) {
+        // An error that fired before this script ran won't call the handler.
+        if (img.complete && img.naturalWidth === 0) drop(img);
+        else img.addEventListener("error", function () { drop(img); });
+      });
+    </script>
+  </body>
+</html>
