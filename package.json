@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "check:export": "node scripts/check-export.mjs",
+    "seed": "node scripts/seed-demo.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
