@@ -4,7 +4,7 @@ An idea notebook. Obsidian-shaped, but the atom isn't a paragraph — it's a **b
 and a block can be ink, a photo, a voice memo, or a file. Project boards are a view
 over the link graph, not a separate thing.
 
-Solo project. ~12 weeks, ~20h/week. Desktop app: Tauri v2 + React 19 + TypeScript,
+Solo project. ~12 weeks, ~10h/week. Desktop app: Tauri v2 + React 19 + TypeScript,
 local-first, single user, optional sync to a Terra box.
 
 The full spec lives in [`plan-final.md`](./plan-final.md). It is the source of truth.
