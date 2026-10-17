@@ -1,3 +1,4 @@
+<img width="1321" height="679" alt="2026_10_16_02_09_29_screenshot" src="https://github.com/user-attachments/assets/87698797-f3cd-4e2a-bae0-33c1c5d79a7e" />
 # Sketchback
 
 An idea notebook. Obsidian-shaped, but the atom isn't a paragraph — it's a **block**,
@@ -45,3 +46,6 @@ docs/index.html       the demo page: one static file, no build step
 Files are intentionally few. Same-type code is kept in one file (the plan's
 `platform/`, `db/`, `views/`, `components/` split is collapsed until it earns its
 keep — see the file-count rule).
+<img width="1317" height="680" alt="2026_10_16_01_18_07_screenshot" src="https://github.com/user-attachments/assets/632fc9f9-47d9-4cee-b6f3-0b230ec4624f" />
+<img width="1323" height="679" alt="2026_10_16_01_18_22_screenshot" src="https://github.com/user-attachments/assets/598645f2-3413-44cd-a17c-44db78bcee58" />
+
