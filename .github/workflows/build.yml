@@ -1,0 +1,117 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  appimage:
+    name: AppImage (Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to 22.04 on purpose: it sets the AppImage's glibc floor at 2.35,
+      # so the result runs on Ubuntu 22.04+ and Debian 12+. Building on a newer
+      # distro would produce a binary that refuses to start on older ones, and
+      # 20.04 is not an option because Tauri v2 needs webkit2gtk-4.1.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev build-essential curl wget file
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - run: npm ci
+
+      - name: Build AppImage
+        run: npm run tauri build -- --bundles appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  portable-exe:
+    name: Portable exe (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - run: npm ci
+
+      # --no-bundle skips NSIS/MSI and leaves the bare executable: one file, no
+      # installer, no registry entries. It still needs the WebView2 runtime,
+      # which ships with Windows 11 and effectively all of Windows 10.
+      - name: Build portable exe
+        run: npm run tauri build -- --no-bundle
+
+      - name: Name the artefact after the version
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          Move-Item src-tauri/target/release/sketchback.exe "Sketchback-$version-portable-x64.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: Sketchback-*-portable-x64.exe
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [appimage, portable-exe]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "${GITHUB_REF_NAME}" artifacts/* --generate-notes --title "${GITHUB_REF_NAME}"

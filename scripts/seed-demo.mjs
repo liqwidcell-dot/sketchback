@@ -66,12 +66,21 @@ if (has("--help") || has("-h")) {
 
 /**
  * Where the app keeps its database. `tauri-plugin-sql` resolves paths against
- * `BaseDirectory::AppConfig`, which on Linux is `$XDG_CONFIG_HOME/<bundle-id>`
- * — see the deviation noted in the journal.
+ * `BaseDirectory::AppConfig`, which is per-OS — see the deviation noted in the
+ * journal. Getting this wrong on Windows means writing to a directory the app
+ * never reads, so the three cases are spelled out.
  */
 function defaultDbPath() {
+  const bundleId = "com.sketchback.app";
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    return join(appData, bundleId, "sketchback.db");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", bundleId, "sketchback.db");
+  }
   const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(configHome, "com.sketchback.app", "sketchback.db");
+  return join(configHome, bundleId, "sketchback.db");
 }
 
 const dbPath = valueOf("--db", defaultDbPath());
