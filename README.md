@@ -37,6 +37,10 @@ Neither file is code-signed, so Windows will show a SmartScreen warning until
 you pick "More info" → "Run anyway". That is what any unsigned binary looks
 like, not a symptom of this one.
 
+**Testing status:** the AppImage has been run with its schema and boot path
+checked. The Windows exe has barely been tested — it runs on Windows 11, and
+that is all that has been confirmed.
+
 ## Status
 
 What's here works and is tested. Most of the app isn't here yet. Being specific about which is
