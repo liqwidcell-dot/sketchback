@@ -7,16 +7,16 @@ out — with one difference: the atom isn't a paragraph, it's a **block**. A blo
 ink, a photo, a voice memo, or a file. Project boards are a view over the link graph, not a
 separate thing.
 
-I'm building this alone, about ten hours a week for roughly twelve weeks. It's a desktop app
-— Tauri v2, React 19, TypeScript, local-first, single user.
+I'm building this alone. It's a desktop app — Tauri v2, React 19, TypeScript, local-first,
+single user.
 
 The spec is [`plan-final.md`](./plan-final.md), and it is the source of truth. Where the code
 has drifted from it, the drift and the reason are written down.
 
 ## Status
 
-**Week 2 of 12.** What's here works and is tested. Most of the app isn't here yet. Being
-specific about which is which seemed better than a feature list that flatters itself.
+What's here works and is tested. Most of the app isn't here yet. Being specific about which is
+which seemed better than a feature list that flatters itself.
 
 Works today:
 
@@ -143,8 +143,7 @@ npm run check:export            # 72/72
 cd src-tauri && cargo test      # 5/5, mostly path-traversal refusals
 ```
 
-The export harness is hand-rolled and lives in `scripts/`. It gets replaced by Vitest in
-week 3.
+The export harness is hand-rolled and lives in `scripts/`. Vitest will take it over.
 
 ## Screenshots
 
