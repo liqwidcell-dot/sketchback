@@ -2,7 +2,7 @@
 
 **An idea notebook.** An Obsidian-shaped app where the atom isn't a paragraph, it's a _block_ — and a block can be ink, a photo, a voice memo, or a file. Project boards are a view over the link graph, not a separate thing.
 
-Solo project. ~12 weeks, ~20h/week, ~240h total.
+Solo project.
 Target: desktop app (Tauri v2), local-first, single user, optional sync to a Hack Club Terra box.
 
 ---
@@ -1178,7 +1178,7 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 ## 21. Week-by-week plan
 
-12 weeks × 20h = 240h. Every week ends with something demoable. If a week slips, take the cut ladder in §23, not the schedule.
+Every week ends with something demoable. If a week slips, take the cut ladder in §23, not the schedule.
 
 ---
 
@@ -1186,16 +1186,16 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** an app that opens a vault and lets you create, rename, and reopen ideas.
 
-| Task | h |
-|---|---|
-| Rust + Tauri v2 scaffold, dev + release build on your primary OS | 4 |
-| Vite + React 19 + TS + Tailwind 4; confirm HMR works in the Tauri webview | 2 |
-| `Platform` interface + `MemoryPlatform` + `TauriPlatform` skeleton | 3 |
-| SQLite schema (full DDL from §7) + migration runner | 3 |
-| Vault open/create, idea CRUD, sidebar list, route to `/idea/:id` | 4 |
-| Command palette skeleton (`Mod+K`), basic keyboard nav | 2 |
-| Repo init, `.gitignore`, first commit, README stub | 1 |
-| **Set up Hackatime properly.** Journal entry for the week | 1 |
+| Task |
+|---|
+| Rust + Tauri v2 scaffold, dev + release build on your primary OS |
+| Vite + React 19 + TS + Tailwind 4; confirm HMR works in the Tauri webview |
+| `Platform` interface + `MemoryPlatform` + `TauriPlatform` skeleton |
+| SQLite schema (full DDL from §7) + migration runner |
+| Vault open/create, idea CRUD, sidebar list, route to `/idea/:id` |
+| Command palette skeleton (`Mod+K`), basic keyboard nav |
+| Repo init, `.gitignore`, first commit, README stub |
+| **Set up Hackatime properly.** Journal entry for the week |
 
 **Acceptance:** `git clone` your repo, build it, create 20 ideas, kill the app, relaunch, all 20 are there. Hackatime dashboard shows `sketchback` accumulating time.
 
@@ -1207,15 +1207,15 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** type in an idea like Notion.
 
-| Task | h |
-|---|---|
-| Block registry, block store, `order_key` (fractional indexing) + tests | 4 |
-| Block container: render list, keyboard nav (↑↓ Home End Mod+Home), selection | 3 |
-| Text block: TipTap instance, markdown shortcuts, split/merge | 4 |
-| Slash menu with keyboard-first navigation | 3 |
-| Op creation + fold for text ops; **wire up undo/redo** | 3 |
-| Drag-to-reorder blocks | 2 |
-| Create the Pixl project on pixl.hackclub.com pointing at Hackatime project `sketchback` | 1 |
+| Task |
+|---|
+| Block registry, block store, `order_key` (fractional indexing) + tests |
+| Block container: render list, keyboard nav (↑↓ Home End Mod+Home), selection |
+| Text block: TipTap instance, markdown shortcuts, split/merge |
+| Slash menu with keyboard-first navigation |
+| Op creation + fold for text ops; **wire up undo/redo** |
+| Drag-to-reorder blocks |
+| Create the Pixl project on pixl.hackclub.com pointing at Hackatime project `sketchback` |
 
 **Acceptance:** write 400 words in one idea; reorder 10 blocks by dragging; `Mod+Z` undoes the last action; reopen and the order persisted.
 
@@ -1227,15 +1227,15 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** make the core architecture decision and stress it.
 
-| Task | h |
-|---|---|
-| Complete op types for ideas/blocks; fold into state | 4 |
-| Sync-safe payload shapes; partial `block.update` | 3 |
-| Undo/redo across blocks (inverse op stack) | 3 |
-| Block virtualisation (only mount visible blocks) | 4 |
-| Performance pass: 300-block idea, profile, fix the top 2 hotspots | 3 |
-| Vitest harness against `MemoryPlatform`; write `op.fold`, `op.undo`, `orderKey` tests | 2 |
-| Rough UI pass — this is the week the app stops looking like a demo | 1 |
+| Task |
+|---|
+| Complete op types for ideas/blocks; fold into state |
+| Sync-safe payload shapes; partial `block.update` |
+| Undo/redo across blocks (inverse op stack) |
+| Block virtualisation (only mount visible blocks) |
+| Performance pass: 300-block idea, profile, fix the top 2 hotspots |
+| Vitest harness against `MemoryPlatform`; write `op.fold`, `op.undo`, `orderKey` tests |
+| Rough UI pass — this is the week the app stops looking like a demo |
 
 **Acceptance:** a 300-block idea types at 60fps. `op.fold` and `op.undo` suites green.
 
@@ -1247,15 +1247,15 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** ideas survive everything, and text feels good.
 
-| Task | h |
-|---|---|
-| Wire real SQLite through `TauriPlatform`; migrations run on first launch | 4 |
-| Idea rename cascade; rename propagation into block text | 3 |
-| Idea metadata: title, icon, colour, pin, delete, archive | 2 |
-| Search: FTS5 populate on debounce + title search | 4 |
-| Command palette: full-text search, ranked, keyboard-only | 4 |
-| `links.rename`, `links.case` tests | 2 |
-| Journal + Pixl reflection | 1 |
+| Task |
+|---|
+| Wire real SQLite through `TauriPlatform`; migrations run on first launch |
+| Idea rename cascade; rename propagation into block text |
+| Idea metadata: title, icon, colour, pin, delete, archive |
+| Search: FTS5 populate on debounce + title search |
+| Command palette: full-text search, ranked, keyboard-only |
+| `links.rename`, `links.case` tests |
+| Journal + Pixl reflection |
 
 **Acceptance:** rename an idea, click any link to it from anywhere, land on the new title. Search finds text inside a block and takes you to the exact block.
 
@@ -1265,17 +1265,17 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** draw in an idea with a pen.
 
-| Task | h |
-|---|---|
-| `SketchBlock` component, canvas sizing at DPR, viewport transform | 3 |
-| perfect-freehand integration; pen/mouse `simulatePressure` | 3 |
-| `getCoalescedEvents` for high-refresh pens | 1 |
-| Pan (two-finger / space+drag / middle) and zoom (pinch / `Cmd+scroll`), anchored at cursor | 3 |
-| Tools: pen, marker (multiply), eraser (stroke-level) | 2 |
-| `block.appendStroke` op; stroke quantisation + bbox | 3 |
-| Dirty-rect invalidation | 2 |
-| SVG + PNG export, cached as `role: 'render'` | 2 |
-| Sketch stress test: 500 strokes, pan at 60fps | 1 |
+| Task |
+|---|
+| `SketchBlock` component, canvas sizing at DPR, viewport transform |
+| perfect-freehand integration; pen/mouse `simulatePressure` |
+| `getCoalescedEvents` for high-refresh pens |
+| Pan (two-finger / space+drag / middle) and zoom (pinch / `Cmd+scroll`), anchored at cursor |
+| Tools: pen, marker (multiply), eraser (stroke-level) |
+| `block.appendStroke` op; stroke quantisation + bbox |
+| Dirty-rect invalidation |
+| SVG + PNG export, cached as `role: 'render'` |
+| Sketch stress test: 500 strokes, pan at 60fps |
 
 **Acceptance:** sketch a full UI mockup in an idea, zoom to 20× and back with no visible degradation, export to SVG, undo 10 strokes and redo them.
 
@@ -1287,16 +1287,16 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** photos in ideas, fast.
 
-| Task | h |
-|---|---|
-| Blob store: content addressing, atomic write via tmp+rename, sharding | 4 |
-| Image pipeline: drop / paste / picker → dedupe → blob → block | 3 |
-| Thumbnail worker: OffscreenCanvas, WebP, semaphore of 2 | 3 |
-| EXIF orientation; strip EXIF from derivatives | 2 |
-| Image block: lazy loading, caption, alt text, remove | 2 |
-| Lightbox: full-screen, arrow keys, zoom, `Esc` | 3 |
-| Sidebar idea list shows a cover thumbnail | 2 |
-| Drag 200 photos into one idea; verify memory stays flat | 1 |
+| Task |
+|---|
+| Blob store: content addressing, atomic write via tmp+rename, sharding |
+| Image pipeline: drop / paste / picker → dedupe → blob → block |
+| Thumbnail worker: OffscreenCanvas, WebP, semaphore of 2 |
+| EXIF orientation; strip EXIF from derivatives |
+| Image block: lazy loading, caption, alt text, remove |
+| Lightbox: full-screen, arrow keys, zoom, `Esc` |
+| Sidebar idea list shows a cover thumbnail |
+| Drag 200 photos into one idea; verify memory stays flat |
 
 **Acceptance:** drop 200 photos into one idea. It doesn't freeze, doesn't OOM, opens in under a second, and re-importing the same 200 photos adds zero new blobs.
 
@@ -1306,16 +1306,16 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** talk to your phone, and the clip lives in the idea forever.
 
-| Task | h |
-|---|---|
-| `Platform.mic`; permission flow; mime detection with the mp4 fallback chain | 3 |
-| Recorder UI: record button, elapsed timer, waveform live preview | 3 |
-| Stop → blob → audio block | 2 |
-| Peaks worker: `decodeAudioData` → 2000 Int8 buckets → base64 | 3 |
-| Waveform player: seek by click/drag, 1.5×/2×, keyboard transport | 4 |
-| Graceful mic-unavailable path (Linux, permission denied) | 2 |
-| Generic file block: attach vs link, preview by type, download | 2 |
-| Journal | 1 |
+| Task |
+|---|
+| `Platform.mic`; permission flow; mime detection with the mp4 fallback chain |
+| Recorder UI: record button, elapsed timer, waveform live preview |
+| Stop → blob → audio block |
+| Peaks worker: `decodeAudioData` → 2000 Int8 buckets → base64 |
+| Waveform player: seek by click/drag, 1.5×/2×, keyboard transport |
+| Graceful mic-unavailable path (Linux, permission denied) |
+| Generic file block: attach vs link, preview by type, download |
+| Journal |
 
 **Acceptance:** record a 40-second voice note on macOS **and** Windows; it plays back on both, and the waveform matches. If macOS requires an `Info.plist` microphone key, this is where you'll find out — budget the afternoon.
 
@@ -1325,16 +1325,16 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** the graph exists.
 
-| Task | h |
-|---|---|
-| Wikilink autocomplete in text blocks (`[[`, fuzzy, keyboard) | 4 |
-| `link` reconciliation on block commit | 2 |
-| Unresolved links + "create this idea" in sidebar | 2 |
-| Backlinks panel with per-block deep links | 3 |
-| Unlinked mentions via `mention` table | 2 |
-| Tags: inline `#tag`, tag pane | 2 |
-| Graph view (stretch pulled forward if ahead) | 2 |
-| Journal | 1 |
+| Task |
+|---|
+| Wikilink autocomplete in text blocks (`[[`, fuzzy, keyboard) |
+| `link` reconciliation on block commit |
+| Unresolved links + "create this idea" in sidebar |
+| Backlinks panel with per-block deep links |
+| Unlinked mentions via `mention` table |
+| Tags: inline `#tag`, tag pane |
+| Graph view (stretch pulled forward if ahead) |
+| Journal |
 
 **Acceptance:** type `[[` and get a live list. Create a link to a nonexistent idea, create that idea, watch the link resolve itself.
 
@@ -1344,16 +1344,16 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** boards, then stop adding features.
 
-| Task | h |
-|---|---|
-| Board/column/card CRUD + migrations | 3 |
-| Board view, drag between columns, auto-scroll, drop indicator | 4 |
-| Card thumbnails from idea's first image/sketch; monogram fallback | 2 |
-| Idea-side board chips ("on 2 boards") | 2 |
-| WIP soft warnings | 1 |
-| `[[wikilink]]`-based board links | 1 |
-| **Polish sprint: empty states, loading states, error states, keyboard shortcuts help sheet** | 4 |
-| Journal | 1 |
+| Task |
+|---|
+| Board/column/card CRUD + migrations |
+| Board view, drag between columns, auto-scroll, drop indicator |
+| Card thumbnails from idea's first image/sketch; monogram fallback |
+| Idea-side board chips ("on 2 boards") |
+| WIP soft warnings |
+| `[[wikilink]]`-based board links |
+| **Polish sprint: empty states, loading states, error states, keyboard shortcuts help sheet** |
+| Journal |
 
 **Acceptance:** drag a card from *Inbox* to *Shipping*; the idea's chips update; search finds the idea; everything is still coherent on the board's other columns.
 
@@ -1365,14 +1365,14 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** the server exists and a second device can push.
 
-| Task | h |
-|---|---|
-| Server: Fastify, SQLite schema, Argon2 auth, tokens | 4 |
-| `POST /push`, `GET /pull`, idempotency, gap rejection | 4 |
-| Blob endpoints + `POST /blobs/check` | 3 |
-| Client sync loop: 15s, background, never blocking UI | 4 |
-| Apply-pulls-in-order; fetch missing blobs before applying ops | 3 |
-| **Kill criterion check** | 2 |
+| Task |
+|---|
+| Server: Fastify, SQLite schema, Argon2 auth, tokens |
+| `POST /push`, `GET /pull`, idempotency, gap rejection |
+| Blob endpoints + `POST /blobs/check` |
+| Client sync loop: 15s, background, never blocking UI |
+| Apply-pulls-in-order; fetch missing blobs before applying ops |
+| **Kill criterion check** |
 
 **Kill criterion:** if local push/pull is not solid by Friday, **stop**. Ship without sync. Replace it with "Export vault" (zip + self-contained HTML), which is 4 hours instead of 40. Sync is a feature; polish is what makes people care.
 
@@ -1384,15 +1384,15 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** two devices converge, and you can share an idea with a human.
 
-| Task | h |
-|---|---|
-| LWW merge + version vectors; `sync.merge` / `sync.lww` property tests | 4 |
-| Conflict surface: "changed on <device>" notice, side-by-side resolve | 3 |
-| Read-only share links: 128-bit token, revoked, expiring | 3 |
-| Public viewer: idea as self-contained HTML with SVG ink | 3 |
-| Schema freeze — no more migrations after this | 2 |
-| Backup: nightly sqlite `.backup` + blob tar, and a "restore from backup" command | 2 |
-| Journal | 1 |
+| Task |
+|---|
+| LWW merge + version vectors; `sync.merge` / `sync.lww` property tests |
+| Conflict surface: "changed on <device>" notice, side-by-side resolve |
+| Read-only share links: 128-bit token, revoked, expiring |
+| Public viewer: idea as self-contained HTML with SVG ink |
+| Schema freeze — no more migrations after this |
+| Backup: nightly sqlite `.backup` + blob tar, and a "restore from backup" command |
+| Journal |
 
 **Acceptance:** edit the same idea on laptop and desktop alternately for 20 operations with the network randomly off. Both converge to identical state. No data loss outside simultaneous same-block editing.
 
@@ -1402,18 +1402,18 @@ A property-based test on `keyBetween` with fast-check is worth 20 minutes and wi
 
 **Goal:** someone else can install it and use it.
 
-| Task | h |
-|---|---|
-| Obsidian vault importer + unsupported-construct report | 4 |
-| Import your real vault; fix every crash it finds | 2 |
-| Onboarding: 3-panel first-run, vault picker, empty states | 3 |
-| Perf pass against §19 budget; fix the two worst offenders | 3 |
-| `tauri-plugin-log` + "copy diagnostics" (no third-party telemetry) | 1 |
-| Auto-updater with minisign key, or a documented manual-update fallback | 2 |
-| README: install, run, build, architecture, honest limitations | 2 |
-| Pixl submission: thumbnail, demo link, journal, **AI disclosure** | 3 |
-| Record a 90-second demo video | 1 |
-| Tag `v1.0.0`, build installers, publish release | 2 |
+| Task |
+|---|
+| Obsidian vault importer + unsupported-construct report |
+| Import your real vault; fix every crash it finds |
+| Onboarding: 3-panel first-run, vault picker, empty states |
+| Perf pass against §19 budget; fix the two worst offenders |
+| `tauri-plugin-log` + "copy diagnostics" (no third-party telemetry) |
+| Auto-updater with minisign key, or a documented manual-update fallback |
+| README: install, run, build, architecture, honest limitations |
+| Pixl submission: thumbnail, demo link, journal, **AI disclosure** |
+| Record a 90-second demo video |
+| Tag `v1.0.0`, build installers, publish release |
 
 **Acceptance:** a stranger installs it, creates an idea, sketches on it, drops a photo, records a note, links two ideas, and puts it on a board — without asking you anything.
 
@@ -1523,23 +1523,22 @@ Resolve these as they come up; each has a default already chosen so you're never
 
 ---
 
-## Appendix A — Hour budget summary
+## Appendix A — Week index
 
-| Week | Theme | h |
-|---|---|---|
-| 1 | Foundation | 20 |
-| 2 | Block editor | 20 |
-| 3 | Op-log **decision gate** + virtualisation | 20 |
-| 4 | Persistence, rename cascade, search | 20 |
-| 5 | **Sketches** | 20 |
-| 6 | **Images** | 20 |
-| 7 | Voice notes + files | 20 |
-| 8 | Links, backlinks, mentions | 20 |
-| 9 | **Boards** + polish sprint, feature freeze | 20 |
-| 10 | Server + sync (**kill criterion**) | 20 |
-| 11 | Merge, share links, backup, schema freeze | 20 |
-| 12 | Import, onboarding, perf, **ship** | 20 |
-| | **Total** | **240** |
+| Week | Theme |
+|---|---|
+| 1 | Foundation |
+| 2 | Block editor |
+| 3 | Op-log **decision gate** + virtualisation |
+| 4 | Persistence, rename cascade, search |
+| 5 | **Sketches** |
+| 6 | **Images** |
+| 7 | Voice notes + files |
+| 8 | Links, backlinks, mentions |
+| 9 | **Boards** + polish sprint, feature freeze |
+| 10 | Server + sync (**kill criterion**) |
+| 11 | Merge, share links, backup, schema freeze |
+| 12 | Import, onboarding, perf, **ship** |
 
 ## Appendix B — Definition of "demoable" per week
 
@@ -2039,7 +2038,7 @@ Things that will look productive and are not.
 
 If you only read one thing before week 1:
 
-**Sketchback is a local-first block editor where a block can be ink, a photo, a voice memo, or a file, and a kanban board is a view over the same link graph.** Twelve weeks, twenty hours a week, solo, shipping to Pixl.
+**Sketchback is a local-first block editor where a block can be ink, a photo, a voice memo, or a file, and a kanban board is a view over the same link graph.** Solo, shipping to Pixl.
 
 The architecture in one paragraph: a Tauri v2 shell over React and TipTap; SQLite via a `Platform` interface that also has a pure-memory twin so E2E tests run in a browser; every mutation is an op in an append-only log, with idea and block state derived by folding that log; blobs are content-addressed files with reference counting; sync is the same ops over HTTP to a small Fastify server on a Terra box, merged last-writer-wins per field.
 
