@@ -4,6 +4,12 @@
 // handle and, later, blob IO, hashing, fs watch and mic fallback. For week 1 the
 // only real job is the schema: the full DDL from plan §7 as migration v1.
 
+// On Windows, a release build without this is linked as a console program: the
+// app runs, but with a stray console window behind it. Checked in the artefact
+// itself (PE header subsystem must read "Windows GUI", not "Windows CUI").
+// Debug builds keep the console so panics and println! stay visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use serde::Deserialize;
 use std::path::{Component, Path, PathBuf};
 use tauri_plugin_sql::{Migration, MigrationKind};

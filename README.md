@@ -13,6 +13,30 @@ single user.
 The spec is [`plan-final.md`](./plan-final.md), and it is the source of truth. Where the code
 has drifted from it, the drift and the reason are written down.
 
+## Download
+
+Two single files, both built by CI:
+
+| Platform | File | Needs |
+| --- | --- | --- |
+| Windows 10/11 | `Sketchback-0.1.0-portable-x64.exe` | WebView2 — present on Windows 11, and on effectively all of Windows 10 |
+| Linux x86_64 | `Sketchback_0.1.0_amd64.AppImage` | glibc 2.34 or newer, and FUSE2 to mount it |
+
+Neither is an installer. The Windows build is a bare executable: nothing to
+install, nothing to uninstall, and your notes live in
+`%APPDATA%\com.sketchback.app\`. On Linux, `chmod +x` the AppImage and run it,
+or use `--appimage-extract-and-run` on a machine without FUSE.
+
+Both carry their own runtime: the AppImage bundles webkit2gtk and its
+JavaScriptCore, so the host does not need WebKit installed, and the exe links
+the WebView2 loader statically, so it is one file with no DLLs beside it. The
+AppImage is built on Ubuntu 22.04 and asks for glibc 2.34 — Ubuntu 22.04+,
+Debian 12+ and RHEL 9+ all qualify.
+
+Neither file is code-signed, so Windows will show a SmartScreen warning until
+you pick "More info" → "Run anyway". That is what any unsigned binary looks
+like, not a symptom of this one.
+
 ## Status
 
 What's here works and is tested. Most of the app isn't here yet. Being specific about which is
@@ -110,10 +134,12 @@ Worth knowing before reading the code.
 ## Where your data lives
 
 Not inside a vault folder, which is where the plan wanted it. `tauri-plugin-sql` resolves
-SQLite paths against the app-config directory, so on Linux the database is at:
+SQLite paths against the app-config directory, so the database is at:
 
 ```text
-~/.config/com.sketchback.app/sketchback.db
+Windows   %APPDATA%\com.sketchback.app\sketchback.db
+macOS     ~/Library/Application Support/com.sketchback.app/sketchback.db
+Linux     ~/.config/com.sketchback.app/sketchback.db
 ```
 
 Making it sit next to a user-chosen vault needs either an absolute-path connection string or
@@ -128,6 +154,7 @@ src/styles.css          Tailwind 4 entry + the design tokens from plan §27
 src-tauri/src/main.rs   the Rust shell: SQLite schema and migrations
 scripts/                the export harness and the seed script
 docs/index.html         the demo page — one static file, no build step
+.github/workflows/      the CI that builds the AppImage and the portable exe
 plan-final.md           the spec
 ```
 
