@@ -235,6 +235,12 @@ export interface IdeaRow {
   updated_at: number;
 }
 
+/** Where a caret request should land inside a freshly focused block. */
+export type FocusAt = "start" | "end";
+
+/** Which edge of a block a dragged block is being dropped against. */
+export type DropSide = "above" | "below";
+
 /** A row from `block` (plan §7). `data_json` is opaque per block type. */
 export interface BlockRow {
   id: string;
@@ -270,7 +276,17 @@ const SQL = {
   insertBlock: `INSERT INTO block (id, idea_id, type, order_key, data_json, created_at, updated_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $6)`,
   updateBlockData: `UPDATE block SET data_json = $1, updated_at = $2 WHERE id = $3`,
+  updateBlockOrder: `UPDATE block SET order_key = $1, updated_at = $2 WHERE id = $3`,
   softDeleteBlock: `UPDATE block SET deleted_at = $1, updated_at = $1 WHERE id = $2`,
+  // Undo of a delete has to revive a soft-deleted row, so this is an upsert
+  // rather than an insert: the id already exists, only `deleted_at` moved.
+  upsertBlock: `INSERT INTO block (id, idea_id, type, order_key, data_json, created_at, updated_at, deleted_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                  order_key = excluded.order_key,
+                  data_json = excluded.data_json,
+                  updated_at = excluded.updated_at,
+                  deleted_at = NULL`,
   readPrefs: `SELECT key, value FROM prefs`,
   writePref: `INSERT INTO prefs (key, value, updated_at) VALUES ($1, $2, $3)
               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
@@ -372,6 +388,8 @@ interface State {
   blocksLoaded: boolean;
   /** Set after creating a block so the new editor can claim the caret. */
   focusBlockId: string | null;
+  /** Whether that caret lands at the block's start or its end. */
+  focusAt: FocusAt;
   /** The block whose editor last held focus — where palette formats land. */
   activeBlockId: string | null;
   setPalette(open: boolean): void;
@@ -386,11 +404,17 @@ interface State {
   dismissNotice(): void;
   exportIdea(id: string): Promise<void>;
   clearFocusBlock(): void;
+  requestFocus(id: string, at?: FocusAt): void;
   setActiveBlock(id: string | null): void;
   loadBlocks(ideaId: string): Promise<void>;
-  createTextBlock(ideaId: string, afterId?: string | null): Promise<string>;
+  createTextBlock(ideaId: string, afterId?: string | null, record?: boolean): Promise<string>;
+  splitBlock(id: string, before: JSONContent, after: JSONContent): Promise<string>;
+  mergeBlocks(prevId: string, id: string, merged: JSONContent): Promise<void>;
+  reorderBlock(id: string, targetId: string, side: DropSide): Promise<void>;
   saveBlockDoc(id: string, doc: JSONContent): Promise<void>;
   removeBlock(id: string): Promise<void>;
+  undo(): Promise<void>;
+  redo(): Promise<void>;
   refresh(): Promise<void>;
   createIdea(title?: string): Promise<string>;
   renameIdea(id: string, title: string): Promise<void>;
@@ -415,6 +439,7 @@ export const useStore = create<State>((set, get) => ({
   blocksFor: null,
   blocksLoaded: false,
   focusBlockId: null,
+  focusAt: "start",
   activeBlockId: null,
 
   setPalette: (open) => set({ paletteOpen: open }),
@@ -477,13 +502,18 @@ export const useStore = create<State>((set, get) => ({
     await platform.db.run(SQL.writePref, ["accent", JSON.stringify(hex), now()]);
   },
 
-  clearFocusBlock: () => set({ focusBlockId: null }),
+  clearFocusBlock: () => set({ focusBlockId: null, focusAt: "start" }),
+  requestFocus: (id, at = "start") => set({ focusBlockId: id, focusAt: at }),
   setActiveBlock: (id) => set({ activeBlockId: id }),
 
   async loadBlocks(ideaId) {
     // Claim the request immediately so a slow response for a previous idea
     // can't overwrite the current one (see the guard below).
     set({ blocksFor: ideaId, blocks: [], blocksLoaded: false });
+    // Structural undo holds whole lists from one idea; switching ideas would
+    // make a restore write the wrong rows, so the stacks do not survive it.
+    undoStack.length = 0;
+    redoStack.length = 0;
     const rows = await platform.db.all<BlockRow>(SQL.listBlocks, [ideaId]);
     if (get().blocksFor !== ideaId) return;
     set({ blocks: rows, blocksLoaded: true });
@@ -494,8 +524,9 @@ export const useStore = create<State>((set, get) => ({
    * order key is generated between its neighbours, so inserting never renumbers
    * a sibling (plan §9).
    */
-  async createTextBlock(ideaId, afterId = null) {
+  async createTextBlock(ideaId, afterId = null, record = true) {
     const blocks = get().blocks;
+    const before = blocks;
     const at = afterId ? blocks.findIndex((b) => b.id === afterId) : -1;
     let lower: string | null;
     let upper: string | null = null;
@@ -537,7 +568,117 @@ export const useStore = create<State>((set, get) => ({
       set({ blocks: get().blocks.filter((b) => b.id !== block.id) });
       throw err;
     }
+    if (record) pushStructural(before, ideaId);
     return block.id;
+  },
+
+  /**
+   * Split one block in two (plan §9's Enter). The left document stays on the
+   * original row so its id, and any link to it, survives the split.
+   */
+  async splitBlock(id, before, after) {
+    const snapshot = get().blocks;
+    const at = snapshot.findIndex((b) => b.id === id);
+    const block = snapshot[at];
+    if (!block) throw new Error("That block no longer exists.");
+
+    const ts = now();
+    const lower = block.order_key;
+    const upper = snapshot[at + 1]?.order_key ?? null;
+    const created: BlockRow = {
+      id: crypto.randomUUID(),
+      idea_id: block.idea_id,
+      type: "text",
+      order_key: generateKeyBetween(lower, upper),
+      data_json: JSON.stringify(after),
+      created_at: ts,
+      updated_at: ts,
+    };
+
+    // Same slot-claiming rule as createTextBlock: state moves first so two
+    // quick Enters cannot both read the same neighbours.
+    const next = snapshot.map((b) =>
+      b.id === id ? { ...b, data_json: JSON.stringify(before), updated_at: ts } : b,
+    );
+    next.splice(at + 1, 0, created);
+    set({ blocks: next });
+
+    try {
+      await platform.db.run(SQL.updateBlockData, [JSON.stringify(before), ts, id]);
+      await platform.db.run(SQL.insertBlock, [
+        created.id,
+        created.idea_id,
+        created.type,
+        created.order_key,
+        created.data_json,
+        ts,
+      ]);
+    } catch (err) {
+      set({ blocks: snapshot });
+      throw err;
+    }
+    pushStructural(snapshot, block.idea_id);
+    return created.id;
+  },
+
+  /** Fold one block into the one above it (plan §9's Backspace). */
+  async mergeBlocks(prevId, id, merged) {
+    const snapshot = get().blocks;
+    const prev = snapshot.find((b) => b.id === prevId);
+    const block = snapshot.find((b) => b.id === id);
+    if (!prev || !block) return;
+
+    const ts = now();
+    const json = JSON.stringify(merged);
+    const next = snapshot
+      .filter((b) => b.id !== id)
+      .map((b) => (b.id === prevId ? { ...b, data_json: json, updated_at: ts } : b));
+    set({ blocks: next });
+
+    try {
+      await platform.db.run(SQL.updateBlockData, [json, ts, prevId]);
+      await platform.db.run(SQL.softDeleteBlock, [ts, id]);
+    } catch (err) {
+      set({ blocks: snapshot });
+      throw err;
+    }
+    pushStructural(snapshot, prev.idea_id);
+  },
+
+  /**
+   * Move a block next to another one. Only the moved row's key changes: the
+   * new key is minted between the destination's neighbours (plan §9).
+   */
+  async reorderBlock(id, targetId, side) {
+    if (id === targetId) return;
+    const snapshot = get().blocks;
+    const moving = snapshot.find((b) => b.id === id);
+    const target = snapshot.find((b) => b.id === targetId);
+    if (!moving || !target) return;
+
+    // Neighbours are read with the moved block already removed, so dropping a
+    // block beside itself cannot produce a key equal to its own.
+    const without = snapshot.filter((b) => b.id !== id);
+    const at = without.findIndex((b) => b.id === targetId);
+    const insertAt = side === "above" ? at : at + 1;
+    const lower = without[insertAt - 1]?.order_key ?? null;
+    const upper = without[insertAt]?.order_key ?? null;
+
+    const ts = now();
+    const key = generateKeyBetween(lower, upper);
+    if (key === moving.order_key) return;
+
+    const next = [...without];
+    next.splice(insertAt, 0, { ...moving, order_key: key, updated_at: ts });
+    set({ blocks: next });
+
+    try {
+      await platform.db.run(SQL.updateBlockOrder, [key, ts, id]);
+    } catch (err) {
+      set({ blocks: snapshot });
+      throw err;
+    }
+    pushStructural(snapshot, moving.idea_id);
   },
 
   // Deliberately does not touch the store: the editor is the live source for
@@ -552,6 +693,7 @@ export const useStore = create<State>((set, get) => ({
 
   async removeBlock(id) {
     const previous = get().blocks;
+    const ideaId = previous.find((b) => b.id === id)?.idea_id;
     set({ blocks: previous.filter((b) => b.id !== id) });
     try {
       await platform.db.run(SQL.softDeleteBlock, [now(), id]);
@@ -559,6 +701,31 @@ export const useStore = create<State>((set, get) => ({
       set({ blocks: previous });
       throw err;
     }
+    if (ideaId) pushStructural(previous, ideaId);
+  },
+
+  /**
+   * Undo the last *structural* change — a block created, deleted, moved, split
+   * or merged. Typing is not recorded here: each editor keeps its own history
+   * and the key handler asks it first.
+   *
+   * This is deliberately a snapshot stack, not §8's inverse-op log: the op log
+   * is a week-3 decision, and this is small enough to throw away when it lands.
+   */
+  async undo() {
+    const entry = undoStack[undoStack.length - 1];
+    if (!entry || entry.ideaId !== get().blocksFor) return;
+    undoStack.pop();
+    redoStack.push(entry);
+    await restoreBlocks(entry.before);
+  },
+
+  async redo() {
+    const entry = redoStack[redoStack.length - 1];
+    if (!entry || entry.ideaId !== get().blocksFor) return;
+    redoStack.pop();
+    undoStack.push(entry);
+    await restoreBlocks(entry.after);
   },
 
   async refresh() {
@@ -583,6 +750,105 @@ export const useStore = create<State>((set, get) => ({
     await get().refresh();
   },
 }));
+
+/* ─────────── Structural undo (plan §9; superseded by §8's op log) ────────── */
+
+/**
+ * One structural change, as the two lists of block rows either side of it.
+ *
+ * The stack holds whole lists rather than inverse operations because a split or
+ * a merge is exactly "two rows in place of one" — there is no tidier inverse.
+ * An idea is tens of rows, so the copy is cheaper than the bookkeeping.
+ */
+interface Snapshot {
+  ideaId: string;
+  before: BlockRow[];
+  after: BlockRow[];
+}
+
+const undoStack: Snapshot[] = [];
+const redoStack: Snapshot[] = [];
+const UNDO_LIMIT = 50;
+
+function pushStructural(before: BlockRow[], ideaId: string): void {
+  const after = useStore.getState().blocks;
+  if (after === before) return;
+  undoStack.push({ ideaId, before, after });
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  // A fresh change invalidates whatever was undone before it.
+  redoStack.length = 0;
+}
+
+/**
+ * Write a remembered list back to the database and to the screen.
+ *
+ * Mounted editors are the live source for their own text, so any row whose
+ * document changed is pushed back into its editor with `emitUpdate: false`:
+ * otherwise the 500 ms autosave would write the pre-undo text straight back.
+ */
+async function restoreBlocks(rows: BlockRow[]): Promise<void> {
+  const current = useStore.getState().blocks;
+  const present = new Map(current.map((b) => [b.id, b]));
+  const wanted = new Set(rows.map((b) => b.id));
+  const ts = now();
+
+  for (const block of current) {
+    if (!wanted.has(block.id)) {
+      await platform.db.run(SQL.softDeleteBlock, [ts, block.id]);
+    }
+  }
+
+  for (const row of rows) {
+    const existing = present.get(row.id);
+    if (
+      existing &&
+      existing.order_key === row.order_key &&
+      existing.data_json === row.data_json &&
+      existing.type === row.type
+    ) {
+      continue;
+    }
+    await platform.db.run(SQL.upsertBlock, [
+      row.id,
+      row.idea_id,
+      row.type,
+      row.order_key,
+      row.data_json,
+      row.created_at,
+      row.updated_at,
+    ]);
+    if (existing) blockSync.get(row.id)?.(parseDoc(row.data_json));
+  }
+
+  useStore.setState({ blocks: rows });
+}
+
+/**
+ * Join two block documents at the caret (plan §9's Backspace merge).
+ *
+ * Paragraphs are stitched inline, which is the common case and the one where
+ * the caret can land on the seam. Anything else keeps both halves as their own
+ * top-level node rather than guessing at a schema-aware join.
+ */
+function mergeDocs(prev: JSONContent, cur: JSONContent): JSONContent {
+  const left = prev.content ?? [];
+  const right = cur.content ?? [];
+  if (!right.length) return prev;
+
+  const a = left[left.length - 1];
+  const b = right[0];
+  if (a?.type === "paragraph" && b?.type === "paragraph") {
+    return {
+      type: "doc",
+      content: [
+        ...left.slice(0, -1),
+        { ...a, content: [...(a.content ?? []), ...(b.content ?? [])] },
+        ...right.slice(1),
+      ],
+    };
+  }
+  return { type: "doc", content: [...left, ...right] };
+}
 
 async function boot(): Promise<void> {
   try {
@@ -853,6 +1119,24 @@ function Sidebar({
  * to apply a format to whatever the user was last editing.
  */
 const blockEditors = new Map<string, Editor>();
+
+/**
+ * The drag payload for reordering. A private type is used on purpose: with
+ * `text/plain`, ProseMirror would treat the drop as pasted text and insert the
+ * block id into the editor before the drop ever reached the block wrapper.
+ */
+const BLOCK_DND = "application/x-sketchback-block";
+
+/**
+ * Push a stored document into a mounted editor without touching its history.
+ *
+ * Undo and merge both replace text the editor is currently showing; going
+ * through this map keeps the editor's cached `latestDoc` in step so the
+ * debounced save cannot write the old text back. The write is marked
+ * `addToHistory: false` on purpose: Ctrl+Z must fall through to the structural
+ * stack, not undo half of a merge inside one editor.
+ */
+const blockSync = new Map<string, (doc: JSONContent) => void>();
 
 /**
  * Extensions shared by every block. Hoisted so the instances keep their
@@ -1480,11 +1764,18 @@ function SlashMenu({
 function TextBlock({ block }: { block: BlockRow }) {
   const openMenu = useStore((s) => s.openMenu);
   const createTextBlock = useStore((s) => s.createTextBlock);
+  const splitBlock = useStore((s) => s.splitBlock);
+  const mergeBlocks = useStore((s) => s.mergeBlocks);
+  const reorderBlock = useStore((s) => s.reorderBlock);
   const removeBlock = useStore((s) => s.removeBlock);
   const saveBlockDoc = useStore((s) => s.saveBlockDoc);
   const focusBlockId = useStore((s) => s.focusBlockId);
+  const focusAt = useStore((s) => s.focusAt);
   const clearFocusBlock = useStore((s) => s.clearFocusBlock);
   const setActiveBlock = useStore((s) => s.setActiveBlock);
+  const requestFocus = useStore((s) => s.requestFocus);
+  // Which edge of this block a dragged block is hovering over, if any.
+  const [drop, setDrop] = useState<DropSide | null>(null);
   const saveTimer = useRef<number | null>(null);
   // The most recent document, kept in a ref so the unmount flush never has to
   // reach for an editor that React may already have destroyed.
@@ -1541,17 +1832,117 @@ function TextBlock({ block }: { block: BlockRow }) {
           }
         }
 
+        const { state } = view;
+        const $from = state.selection.$from;
+        const blocks = useStore.getState().blocks;
+        const index = blocks.findIndex((b) => b.id === block.id);
+        const collapsed = state.selection.empty;
+        // "At the start/end of a block" means the caret sits in the outermost
+        // node. Inside a list item or a quote, the block is not the unit the
+        // caret is moving between, so those keep ProseMirror's own behaviour.
+        const atTop = collapsed && $from.depth === 1 && $from.parentOffset === 0;
+        const atEnd = collapsed && isAtEndOfNode(state);
+
+        // Ctrl+Z / Ctrl+Y: the block's own history answers first, and only when
+        // it has nothing left does the structural stack get a turn. Plan §29
+        // calls this `Mod`; the project rule is Ctrl everywhere, so Meta is
+        // deliberately not accepted.
+        if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+          const key = event.key.toLowerCase();
+          if (key === "z" || key === "y") {
+            const target = editorRef.current;
+            const local = key === "z" ? target?.can().undo() : target?.can().redo();
+            if (local) return false;
+            if (key === "z") void useStore.getState().undo();
+            else void useStore.getState().redo();
+            return true;
+          }
+        }
+        if (event.ctrlKey && !event.metaKey && event.shiftKey && event.key.toLowerCase() === "z") {
+          if (editorRef.current?.can().redo()) return false;
+          void useStore.getState().redo();
+          return true;
+        }
+
+        // ↑ at the top of a block steps into the one above; ↓ at the bottom
+        // steps into the one below (plan §9's block keyboard nav).
+        if (event.key === "ArrowUp" && collapsed && !event.shiftKey && !event.ctrlKey && !event.altKey) {
+          if (!atTop || index <= 0) return false;
+          requestFocus(blocks[index - 1].id, "end");
+          return true;
+        }
+        if (event.key === "ArrowDown" && collapsed && !event.shiftKey && !event.ctrlKey && !event.altKey) {
+          if (!atEnd || index < 0 || index >= blocks.length - 1) return false;
+          requestFocus(blocks[index + 1].id, "start");
+          return true;
+        }
+        // Ctrl+Home / Ctrl+End are §9's `Mod+Home`: first and last block.
+        if (event.ctrlKey && !event.metaKey && (event.key === "Home" || event.key === "End")) {
+          if (!blocks.length) return false;
+          const first = event.key === "Home";
+          requestFocus(first ? blocks[0].id : blocks[blocks.length - 1].id, first ? "start" : "end");
+          return true;
+        }
+
+        // Backspace at the start of a block folds it into the one above
+        // (plan §9). The older block keeps its id and its text; this row is
+        // what disappears, which also makes Backspace on an empty block a
+        // delete.
+        if (event.key === "Backspace" && atTop && index > 0) {
+          if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+          const prev = blocks[index - 1];
+          if (prev.type === "text") {
+            const prevEditor = blockEditors.get(prev.id);
+            const prevDoc = prevEditor ? prevEditor.getJSON() : parseDoc(prev.data_json);
+            const merged = mergeDocs(prevDoc, state.doc.toJSON());
+            if (prevEditor) {
+              // Where the two halves meet: the end of the older text, read
+              // before the join changes the document's size.
+              const caret = prevEditor.state.doc.content.size - 1;
+              blockSync.get(prev.id)?.(merged);
+              prevEditor.commands.focus(caret);
+            } else {
+              requestFocus(prev.id, "end");
+            }
+            void mergeBlocks(prev.id, block.id, merged);
+            return true;
+          }
+        }
+
         if (event.key !== "Enter") return false;
         if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
-        const { state } = view;
-        if (!state.selection.empty) return false;
+        if (!collapsed) return false;
         // A newline inside a code block is content, not a new block.
-        if (state.selection.$from.parent.type.name === "codeBlock") return false;
-        if (!isAtEndOfNode(state)) return false;
+        if ($from.parent.type.name === "codeBlock") return false;
+        // So is a new list item: it belongs to the list it is in.
+        if ($from.depth !== 1) return false;
+        // `cut` below works on the first top-level node, so a caret anywhere
+        // else in the document keeps ProseMirror's own split.
+        if ($from.index(0) !== 0) return false;
+        const node = state.doc.firstChild;
+        if (!node) return false;
 
-        // Enter at the end of a block starts the next one (plan §9).
-        void createTextBlock(block.idea_id, block.id).then((id) => {
-          useStore.setState({ focusBlockId: id });
+        // Enter splits the block at the caret (plan §9). The right-hand half
+        // becomes the new row, so the left keeps its id and its links.
+        const offset = $from.parentOffset;
+        const right = node.cut(offset);
+        const after: JSONContent = right.content.size
+          ? { type: "doc", content: [right.toJSON()] }
+          : { type: "doc", content: [{ type: "paragraph" }] };
+        const before: JSONContent = { type: "doc", content: [node.cut(0, offset).toJSON()] };
+        const empty = node.content.size === 0;
+
+        // Returning true swallows ProseMirror's own Enter, so the shortened
+        // document has to be put back into the running editor — otherwise the
+        // block keeps showing the text that just moved into the row below.
+        blockSync.get(block.id)?.(before);
+
+        void splitBlock(block.id, before, after).then((id) => {
+          // Splitting at the very start leaves the empty half above and the
+          // text below; the caret stays in the half it was typed in. Everywhere
+          // else the caret follows the text it pushed down.
+          if (offset > 0 || empty) requestFocus(id, "start");
+          else editorRef.current?.commands.focus("start");
         });
         return true;
       },
@@ -1586,20 +1977,30 @@ function TextBlock({ block }: { block: BlockRow }) {
 
   editorRef.current = editor;
 
-  // Publish this editor so the palette can reach it (see `blockEditors`).
+  // Publish this editor so the palette can reach it (see `blockEditors`), and
+  // register the silent setter undo, merge and split use (see `blockSync`).
   useEffect(() => {
     blockEditors.set(block.id, editor);
+    blockSync.set(block.id, (doc) => {
+      latestDoc.current = doc;
+      if (!editor) return;
+      const next = editor.schema.nodeFromJSON(doc);
+      const tr = editor.state.tr.replaceWith(0, editor.state.doc.content.size, next.content);
+      tr.setMeta("addToHistory", false);
+      editor.view.dispatch(tr);
+    });
     return () => {
       blockEditors.delete(block.id);
+      blockSync.delete(block.id);
     };
   }, [block.id, editor]);
 
   // A freshly created block claims the caret once its editor exists.
   useEffect(() => {
     if (!editor || focusBlockId !== block.id) return;
-    editor.commands.focus("start");
+    editor.commands.focus(focusAt);
     clearFocusBlock();
-  }, [editor, focusBlockId, block.id, clearFocusBlock]);
+  }, [editor, focusBlockId, focusAt, block.id, clearFocusBlock]);
 
   // The popup is anchored to *viewport* coordinates, so a scroll would leave it
   // floating over unrelated text. Re-anchor it to the caret instead — the doc
@@ -1651,9 +2052,7 @@ function TextBlock({ block }: { block: BlockRow }) {
       {
         label: "Add block below",
         onSelect: () => {
-          void createTextBlock(block.idea_id, block.id).then((id) => {
-            useStore.setState({ focusBlockId: id });
-          });
+          void createTextBlock(block.idea_id, block.id).then((id) => requestFocus(id));
         },
       },
       { label: "Copy as Markdown", onSelect: () => void copyMarkdown() },
@@ -1663,6 +2062,7 @@ function TextBlock({ block }: { block: BlockRow }) {
 
   return (
     <div
+      data-block-id={block.id}
       className="group relative rounded px-1 py-0.5 transition-colors duration-[120ms] ease-standard hover:bg-surface-raised"
       onContextMenu={(e) => {
         e.preventDefault();
@@ -1670,18 +2070,79 @@ function TextBlock({ block }: { block: BlockRow }) {
         e.stopPropagation();
         showMenu(e.clientX, e.clientY);
       }}
+      // A block is a drop target for other blocks (plan §9's drag-to-reorder).
+      // Drop is handled in the capture phase so ProseMirror never sees it.
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes(BLOCK_DND)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const rect = e.currentTarget.getBoundingClientRect();
+        const side = e.clientY < rect.top + rect.height / 2 ? "above" : "below";
+        setDrop((prev) => (prev === side ? prev : side));
+      }}
+      onDragLeave={(e) => {
+        // Moving between children inside the block is not leaving the block.
+        if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return;
+        setDrop(null);
+      }}
+      onDropCapture={(e) => {
+        if (!e.dataTransfer.types.includes(BLOCK_DND)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const id = e.dataTransfer.getData(BLOCK_DND);
+        const side = drop ?? "below";
+        setDrop(null);
+        if (!id || id === block.id) return;
+        if (!useStore.getState().blocks.some((b) => b.id === id)) return;
+        void reorderBlock(id, block.id, side).then(() => requestFocus(id, "start"));
+      }}
     >
-      <button
-        type="button"
-        aria-label="Block actions"
-        onClick={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          showMenu(rect.left, rect.bottom + 4);
-        }}
-        className="absolute top-1 -left-7 hidden rounded px-1.5 py-0.5 text-xs text-text-secondary group-hover:block hover:text-accent"
-      >
-        ⋮
-      </button>
+      <div className="absolute top-0.5 -left-10 flex items-center gap-0.5 opacity-0 transition-opacity duration-[120ms] ease-standard group-hover:opacity-100 focus-within:opacity-100">
+        <button
+          type="button"
+          draggable
+          aria-label="Reorder block"
+          title="Drag to reorder — or Alt+↑ / Alt+↓"
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData(BLOCK_DND, block.id);
+          }}
+          onDragEnd={() => setDrop(null)}
+          onKeyDown={(e) => {
+            // Keyboard reorder, so the gesture exists without a mouse.
+            if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+            e.preventDefault();
+            const blocks = useStore.getState().blocks;
+            const at = blocks.findIndex((b) => b.id === block.id);
+            const target = blocks[e.key === "ArrowUp" ? at - 1 : at + 1];
+            if (!target) return;
+            void reorderBlock(block.id, target.id, e.key === "ArrowUp" ? "above" : "below");
+            requestFocus(block.id, "start");
+          }}
+          className="cursor-grab rounded px-0.5 text-xs text-text-secondary hover:text-accent active:cursor-grabbing"
+        >
+          ⋮⋮
+        </button>
+        <button
+          type="button"
+          aria-label="Block actions"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            showMenu(rect.left, rect.bottom + 4);
+          }}
+          className="rounded px-0.5 text-xs text-text-secondary hover:text-accent"
+        >
+          ⋮
+        </button>
+      </div>
+      {drop ? (
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 h-0.5 rounded bg-accent ${
+            drop === "above" ? "-top-px" : "-bottom-px"
+          }`}
+        />
+      ) : null}
       <EditorContent editor={editor} />
       {slash ? (
         <SlashMenu
@@ -1708,6 +2169,7 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
   const blocksLoaded = useStore((s) => s.blocksLoaded);
   const loadBlocks = useStore((s) => s.loadBlocks);
   const createTextBlock = useStore((s) => s.createTextBlock);
+  const requestFocus = useStore((s) => s.requestFocus);
   const exportIdea = useStore((s) => s.exportIdea);
   const [draft, setDraft] = useState(idea.title);
   const titleRef = useRef<HTMLInputElement>(null);
@@ -1720,19 +2182,20 @@ function IdeaView({ idea }: { idea: IdeaRow }) {
 
   const ready = blocksFor === idea.id && blocksLoaded;
 
-  // An idea always opens with somewhere to type.
+  // An idea always opens with somewhere to type. The first block is not an
+  // undoable edit: undoing it would leave an idea with nothing to type in.
   useEffect(() => {
     if (!ready || seeded.current || blocks.length > 0) return;
     seeded.current = true;
-    void createTextBlock(idea.id).then((id) => useStore.setState({ focusBlockId: id }));
-  }, [ready, blocks.length, idea.id, createTextBlock]);
+    void createTextBlock(idea.id, null, false).then((id) => requestFocus(id));
+  }, [ready, blocks.length, idea.id, createTextBlock, requestFocus]);
 
   const commit = () => {
     if (draft.trim() !== idea.title) void renameIdea(idea.id, draft);
   };
 
   const appendBlock = () => {
-    void createTextBlock(idea.id).then((id) => useStore.setState({ focusBlockId: id }));
+    void createTextBlock(idea.id).then((id) => requestFocus(id));
   };
 
   return (
@@ -2613,6 +3076,25 @@ function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [setPalette]);
+
+  // Undo for structural change (a block moved, split, merged or deleted) when
+  // the caret is not in a block. Inside one, TextBlock's handler asks the
+  // editor's own history first and only then reaches the same stack.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      // Native fields (the palette, an idea title) and block editors keep it.
+      if (el?.closest("input, textarea, [contenteditable='true']")) return;
+      const key = e.key.toLowerCase();
+      if (key !== "z" && key !== "y") return;
+      e.preventDefault();
+      if (key === "y" || e.shiftKey) void useStore.getState().redo();
+      else void useStore.getState().undo();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Paint the theme onto <html>. `system` follows the OS live.
   useEffect(() => {
